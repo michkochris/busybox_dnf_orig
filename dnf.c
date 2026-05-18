@@ -25,6 +25,13 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+/*
+ * DESIGN NOTE: busybox_dnf is a native BusyBox applet. It is designed to
+ * operate using only BusyBox internal applets (wget, rpm, cpio, etc.)
+ * to ensure it remains functional even on a broken system where
+ * external shared libraries or standalone package managers are corrupted.
+ */
+
 /* ANSI Colors */
 #define CLR_GREEN  "\033[0;32m"
 #define CLR_RED    "\033[0;31m"
@@ -162,7 +169,7 @@ static char *get_releasever(void)
 			fclose(fp);
 		}
 	}
-	return version ? version : xstrdup("41");
+	return version ? version : xstrdup("44");
 }
 
 static char *get_basearch(void)
@@ -184,6 +191,7 @@ static void load_repos(dnf_context_t *ctx)
 		if (!strrstr(entry->d_name, ".repo")) continue;
 
 		char *path = xasprintf("/etc/yum.repos.d/%s", entry->d_name);
+		if (ctx->verbose) printf("[DEBUG] Parsing repo file: %s\n", path);
 		parser_t *p = config_open(path);
 		free(path);
 		if (!p) continue;
@@ -241,17 +249,45 @@ static void parse_metalink_stream(dnf_context_t *ctx, const char *cache_path)
 
 	/* Fast pointer-scanning matching standard BusyBox token logic */
 	while (fgets(line, sizeof(line), fp) && ctx->candidate_count < MAX_CANDIDATE_MIRRORS) {
-		char *url_start = strstr(line, "<url type=\"http");
-		if (url_start) {
-			url_start = strchr(url_start, '>') + 1; /* Move past closing bracket */
-			char *url_end = strchr(url_start, '<'); /* Find closing tag */
+		/* 
+		 * BUG FIX: Fedora's mirror manager outputs `<url protocol="http"` instead 
+		 * of `<url type="http"`. We now broadly match `<url ` and `http` to 
+		 * ensure we don't fail during the PARSE_METALINK state.
+		 *
+		 * IMPORTANT: Modern 'wget2' (default on Fedora 44) automatically follows
+		 * Metalink redirects. We rely on BusyBox's internal 'wget' applet
+		 * which is 'dumb' enough to just save the XML list we need to parse.
+		 */
+		char *url_start = strstr(line, "<url ");
+		if (url_start && strstr(line, "http")) {
+			url_start = strchr(url_start, '>');
+			if (url_start) {
+				url_start++; /* Move past closing bracket */
+				char *url_end = strchr(url_start, '<'); /* Find closing tag */
 
-			if (url_end && (url_end - url_start) < URL_MAX_LEN) {
-				mirror_node_t *node = &ctx->candidates[ctx->candidate_count];
-				memcpy(node->url, url_start, url_end - url_start);
-				node->url[url_end - url_start] = '\0';
-				node->priority = ctx->candidate_count + 1;
-				ctx->candidate_count++;
+				if (url_end && (url_end - url_start) < URL_MAX_LEN) {
+					mirror_node_t *node = &ctx->candidates[ctx->candidate_count];
+					int len = url_end - url_start;
+					memcpy(node->url, url_start, len);
+					node->url[len] = '\0';
+
+					/*
+					 * Fedora Metalinks often point directly to the repomd.xml.
+					 * We strip this suffix to get the base mirror URL, which we
+					 * then use to construct paths for other metadata files.
+					 */
+					char *p = strstr(node->url, "/repodata/repomd.xml");
+					if (p) *p = '\0';
+
+					/* Strip trailing slash if present for consistent path joining */
+					len = strlen(node->url);
+					if (len > 0 && node->url[len - 1] == '/')
+						node->url[len - 1] = '\0';
+
+					node->priority = ctx->candidate_count + 1;
+					if (ctx->verbose) printf("[DEBUG] Found mirror candidate: %s\n", node->url);
+					ctx->candidate_count++;
+				}
 			}
 		}
 	}
@@ -282,7 +318,8 @@ static void parse_repomd_stream(dnf_context_t *ctx, const char *cache_path)
 						tlen--;
 					while (loc[0] == '/')
 						loc++;
-					snprintf(ctx->primary_xml_url, URL_MAX_LEN, "%.*s/%s", tlen, ctx->target_mirror_url, loc);
+					snprintf(ctx->primary_xml_url, URL_MAX_LEN, "%.*s/%.*s", tlen, ctx->target_mirror_url, (int)(end - loc), loc);
+					if (ctx->verbose) printf("[DEBUG] Found Primary XML: %s\n", ctx->primary_xml_url);
 					in_primary = 0;
 					break;
 				}
@@ -299,20 +336,38 @@ static void dnf_debug_context(dnf_context_t *ctx, dnf_state_t state)
 {
 	if (!ctx->verbose) return;
 
-	printf("\n--- FSM DEBUG [State: %d] ---\n", state);
-	printf("  Release: %s, Arch: %s\n", ctx->releasever, ctx->basearch);
-	printf("  Current Repo Index: %d (%s)\n", ctx->current_repo_idx,
-		   ctx->repo_count > 0 ? ctx->repos[ctx->current_repo_idx].id : "none");
-	printf("  Master URL: %s\n", ctx->master_url);
-	printf("  Target Mirror: %s\n", ctx->target_mirror_url[0] ? ctx->target_mirror_url : "none");
-	printf("  Primary XML: %s\n", ctx->primary_xml_url[0] ? ctx->primary_xml_url : "none");
-	printf("  Candidates: %d cached\n", ctx->candidate_count);
-	printf("----------------------------\n\n");
+	printf("\n" CLR_BOLD "[DEBUG] FSM State Change -> %d" CLR_RESET "\n", state);
+	printf("  [Context] Release: %s | Arch: %s\n", ctx->releasever, ctx->basearch);
+	printf("  [Repo]    ID: %s (Index: %d/%d)\n",
+		   ctx->repo_count > 0 ? ctx->repos[ctx->current_repo_idx].id : "none",
+		   ctx->current_repo_idx + 1, ctx->repo_count);
+	printf("  [URL]     Master: %s\n", ctx->master_url);
+
+	if (ctx->target_mirror_url[0])
+		printf("  [URL]     Active Mirror: %s\n", ctx->target_mirror_url);
+
+	if (ctx->candidate_count > 0) {
+		printf("  [Mirrors] Cached Candidates:\n");
+		for (int i = 0; i < ctx->candidate_count; i++) {
+			printf("    %d. %s\n", i + 1, ctx->candidates[i].url);
+		}
+	}
+
+	if (ctx->primary_xml_url[0])
+		printf("  [Data]    Primary Metadata URL: %s\n", ctx->primary_xml_url);
+	printf("----------------------------------------\n");
 }
 
 static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path)
 {
-	char *cmd = xasprintf("zcat %s 2>/dev/null || xzcat %s 2>/dev/null || cat %s", cache_path, cache_path, cache_path);
+	/*
+	 * We utilize BusyBox internal applets (zcat/xzcat) for streaming extraction.
+	 * Fedora 44 uses .zst compression. If unzstd is not in BusyBox, it will
+	 * fall back to the system's unzstd command if available.
+	 */
+	char *cmd = xasprintf("zcat %s 2>/dev/null || xzcat %s 2>/dev/null || unzstd -c %s 2>/dev/null || cat %s",
+						 cache_path, cache_path, cache_path, cache_path);
+	if (ctx->verbose) printf("[DEBUG] Extraction cmd: %s\n", cmd);
 	FILE *fp = popen(cmd, "r");
 	free(cmd);
 
@@ -408,9 +463,14 @@ static int run_dnf_update_cycle(dnf_context_t *ctx, int repo_idx)
 		dnf_debug_context(ctx, state);
 		switch (state) {
 		case STATE_FETCH_ROUTER:
+			if (ctx->verbose) printf("[DEBUG] Fetching Metalink from: %s\n", ctx->master_url);
 			printf("STATE: FETCH_ROUTER (%s) ... ", ctx->repos[ctx->current_repo_idx].id);
 			{
 				mkdir("/var/cache/dnf", 0755);
+				/*
+				 * We rely on BusyBox 'wget' which does not automatically follow
+				 * Metalinks (unlike modern wget2).
+				 */
 				char *wget_cmd = xasprintf("wget -q -O %s \"%s\"", cache_file, ctx->master_url);
 				int rc = system(wget_cmd);
 				free(wget_cmd);
@@ -499,8 +559,8 @@ static int run_dnf_update_cycle(dnf_context_t *ctx, int repo_idx)
 
 		case STATE_PARSE_PRIMARY:
 			printf("STATE: PARSE_PRIMARY ... ");
-			/* We parse during search or if we need to populate a database */
-			if (ctx->search_term) {
+			/* We parse during search/info or if we need to populate a database */
+			if (ctx->search_term || ctx->info_target) {
 				printf("PASS\n");
 				parse_primary_stream(ctx, primary_file);
 			} else {
