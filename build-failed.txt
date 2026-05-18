@@ -1,0 +1,51 @@
+*
+* Busybox DNF
+*
+dnf (8 kb) (DNF) [Y/n/?] (NEW) y
+Configuring DNF applet...
+Disabling problematic features...
+scripts/kconfig/conf -s Config.in
+#
+# using defaults found in .config
+#
+Compiling BusyBox...
+  SPLIT   include/autoconf.h -> include/config/*
+  GEN     include/bbconfigopts.h
+  GEN     include/common_bufsiz.h
+  GEN     include/embedded_scripts.h
+  HOSTCC  applets/usage
+In file included from applets/usage.c:30:
+include/applets.h:114:1: error: implicit declaration of function ‘IF_APT’; did you mean ‘IF_CAT’? [-Wimplicit-function-declaration]
+  114 | IF_APT(APPLET(apt, BB_DIR_USR_BIN, BB_SUID_DROP))
+      | ^~~~~~
+      | IF_CAT
+applets/usage.c:25:34: error: expected expression before ‘{’ token
+   25 | #define MAKE_USAGE(aname, usage) { aname, usage },
+      |                                  ^
+include/applets.h:41:46: note: in expansion of macro ‘MAKE_USAGE’
+   41 | # define APPLET(name,l,s)                    MAKE_USAGE(#name, name##_trivial_usage name##_full_usage)
+      |                                              ^~~~~~~~~~
+include/applets.h:114:8: note: in expansion of macro ‘APPLET’
+  114 | IF_APT(APPLET(apt, BB_DIR_USR_BIN, BB_SUID_DROP))
+      |        ^~~~~~
+In file included from applets/usage.c:11:
+applets/usage.c:25:34: error: expected ‘}’ before ‘{’ token
+   25 | #define MAKE_USAGE(aname, usage) { aname, usage },
+      |                                  ^
+include/autoconf.h:8200:22: note: in definition of macro ‘IF_DNF’
+ 8200 | # define IF_DNF(...) __VA_ARGS__
+      |                      ^~~~~~~~~~~
+include/applets.h:41:46: note: in expansion of macro ‘MAKE_USAGE’
+   41 | # define APPLET(name,l,s)                    MAKE_USAGE(#name, name##_trivial_usage name##_full_usage)
+      |                                              ^~~~~~~~~~
+include/applets.h:115:8: note: in expansion of macro ‘APPLET’
+  115 | IF_DNF(APPLET(dnf, BB_DIR_USR_BIN, BB_SUID_DROP))
+      |        ^~~~~~
+applets/usage.c:29:19: note: to match this ‘{’
+   29 | } usage_array[] = {
+      |                   ^
+make[1]: *** [scripts/Makefile.host:104: applets/usage] Error 1
+make: *** [Makefile:372: applets_dir] Error 2
+--------------------------------------------------
+Error: Build failed!
+--------------------------------------------------

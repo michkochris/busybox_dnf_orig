@@ -1,0 +1,39 @@
+Action-Todo for busybox_dnf Implementation
+1. Core Architecture (The Mirror Resolution FSM)
+Based on context.txt, the first major task is implementing the Finite State Machine (FSM) for dynamic mirror resolution:
+•
+[STATE_INIT]: Construct the Master Router URL (Fedora Metalink).
+•
+[STATE_ROUTER]: Fetch the Metalink XML from the master router.
+•
+[STATE_PARSE]: Extract candidate mirror URLs and verify hashes (SHA-256).
+•
+[STATE_OPTIMUM]: Test connectivity and lock the fastest/closest mirror.
+•
+[STATE_EXECUTE]: Transition to the primary package operation.
+2. Command Implementation (Applet Logic)
+Based on the README.md, you need to implement the following subcommands within dnf.c:
+•
+check-update / update: Sync repository metadata and identify package versions.
+•
+install / remove: Handle the primary package lifecycle and dependency resolution.
+•
+search / info: Implement alphabetical search and metadata display.
+•
+verify: Verify package sanity (deps, status, and file integrity).
+3. System Rescue Features (Unique Failsafes)
+Implement the specialized recovery tools mentioned in the "Rescue Workflow":
+•
+reinstall: Restore files via standard rpm calls.
+•
+rescue-install: Implement the failsafe extraction logic using BusyBox's internal cpio and rpm2cpio to bypass a broken rpm database.
+4. UI and Progress Tracking
+•
+Progress Bar: Implement a terminal-aware progress bar for downloads and installations.
+•
+Output Formatting: Ensure the UI matches the professional, colored output format of standard DNF.
+5. Build Integration
+•
+Kbuild/Config: Ensure the applet is correctly integrated into the BusyBox menu system (partially handled by busybox_build.sh).
+•
+Dependency Check: Ensure internal applets like wget, rpm, and cpio are selected as dependencies.

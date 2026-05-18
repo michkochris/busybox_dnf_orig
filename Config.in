@@ -1,0 +1,15 @@
+menu "Busybox DNF"
+
+config DNF
+	bool "dnf (8 kb)"
+	default y
+	select RPM
+	select RPM2CPIO
+	help
+	dnf is a high-level package management frontend for RPM-based
+	systems. It handles repository management and dependency
+	resolution as a frontend to rpm. It includes unique rescue
+	features to manually extract packages using built-in utilities
+	if the system package manager is broken.
+
+endmenu
