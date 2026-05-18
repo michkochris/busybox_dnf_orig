@@ -191,7 +191,12 @@ static void load_repos(dnf_context_t *ctx)
 		char *tokens[2];
 		repo_t *curr_repo = NULL;
 
-		while (config_read(p, tokens, 2, 0, "= ", PARSE_NORMAL | PARSE_GREEDY)) {
+		/*
+		 * The delimiter string "#= " sets '#' as the comment character. 
+		 * Using "= " (as before) caused the parser to incorrectly treat '=' 
+		 * as a comment, silently dropping crucial keys like 'metalink='.
+		 */
+		while (config_read(p, tokens, 2, 0, "#= ", PARSE_NORMAL | PARSE_GREEDY)) {
 			if (tokens[0][0] == '[') {
 				char *id = xstrdup(tokens[0] + 1);
 				char *end = strchr(id, ']');
@@ -200,7 +205,12 @@ static void load_repos(dnf_context_t *ctx)
 				if (ctx->repo_count < MAX_REPOS) {
 					curr_repo = &ctx->repos[ctx->repo_count++];
 					curr_repo->id = id;
-					curr_repo->enabled = 0;
+					/* 
+					 * DNF/YUM defaults to treating a repo as enabled if the 'enabled=' 
+					 * key is omitted from the .repo file. Defaulting to 1 matches 
+					 * expected behavior and prevents initialization failures.
+					 */
+					curr_repo->enabled = 1;
 					curr_repo->metalink = NULL;
 				} else {
 					free(id);
