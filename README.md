@@ -1,26 +1,8 @@
 # busybox_dnf
 
-<p align="center">
-  <img src="https://shields.io" />
-</p>
-
-<h1 align="center">Project Name</h1>
-
-<p align="center">
-  🚀 <i>Currently under development. Not yet ready for production use.</i>
-</p>
-
----
-
-![Status](https://shields.io)
-
 > [!IMPORTANT]
 > **This project is currently under active development.** 
 > Expect frequent breaking changes and incomplete documentation.
-
-# 🛠️ Under Construction
-
-**Note:** This repository is a work in progress. Parts of the API may change without notice.
 
 What is busybox_dnf:
 
