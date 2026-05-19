@@ -1,0 +1,82 @@
+[ Zephyrus /mnt/c/Users/michk/Downloads/projects/busybox-1.37.0 ]# time ./busybox dnf
+BusyBox v1.37.0 (2026-05-17 23:28:23 EDT) multi-call binary.
+
+Usage: dnf [-y] COMMAND [PACKAGE...]
+
+High-level package management frontend
+
+Options:
+        -y, --assumeyes Answer yes for all questions
+        -v, --verbose   Verbose output
+
+Commands:
+        check-update    Check for available package updates
+        update          Update the system
+        search          Search for a package
+        info            Display details about a package
+
+real    0m0.007s
+user    0m0.000s
+sys     0m0.003s
+[ Zephyrus /mnt/c/Users/michk/Downloads/projects/busybox-1.37.0 ]# time ./busybox dnf update
+Updating and loading repositories:
+ (2/3): fedora                                  [OK]
+ (3/3): fedora-cisco-openh264                   [OK]
+Metadata cache created.
+Last metadata expiration check: 10:44:17
+Dependencies resolved.
+Nothing to do.
+Complete!
+
+real    0m4.805s
+user    0m0.405s
+sys     0m0.246s
+[ Zephyrus /mnt/c/Users/michk/Downloads/projects/busybox-1.37.0 ]# time ./busybox dnf update
+Updating and loading repositories:
+ (2/3): fedora                                  [OK]
+ (3/3): fedora-cisco-openh264                   [OK]
+Metadata cache created.
+Last metadata expiration check: 10:44:17
+Dependencies resolved.
+Nothing to do.
+Complete!
+
+real    0m0.738s
+user    0m0.087s
+sys     0m0.058s
+[ Zephyrus /mnt/c/Users/michk/Downloads/projects/busybox-1.37.0 ]# time ./busybox dnf search nano
+Updating and loading repositories:
+ (2/3): fedora                                  [OK]
+ (3/3): fedora-cisco-openh264                   [OK]
+Metadata cache created.
+R-nanotime.x86_64 : Nanosecond-Resolution Time Support for R
+moby-engine-nano.noarch : GNU nano syntax highlighting files for Moby
+nano.x86_64 : A small text editor
+nano-default-editor.noarch : Sets GNU nano as the default editor
+nanoflann-devel.i686 : Development files for nanoflann
+nanoflann-devel.x86_64 : Development files for nanoflann
+plasma-nano.x86_64 : Minimalist Plasma shell for developing custom experiences on embedded devices
+
+real    0m1.166s
+user    0m0.273s
+sys     0m0.304s
+[ Zephyrus /mnt/c/Users/michk/Downloads/projects/busybox-1.37.0 ]# time ./busybox dnf info nano
+Updating and loading repositories:
+ (2/3): fedora                                  [OK]
+ (3/3): fedora-cisco-openh264                   [OK]
+Metadata cache created.
+Name         : nano
+Version      : 8.7.1
+Release      : 2.fc44
+Architecture : x86_64
+License      :
+URL          : https://www.nano-editor.org
+Summary      : A small text editor
+Description  :
+Repository   : updates
+
+
+real    0m0.976s
+user    0m0.305s
+sys     0m0.280s
+[ Zephyrus /mnt/c/Users/michk/Downloads/projects/busybox-1.37.0 ]#

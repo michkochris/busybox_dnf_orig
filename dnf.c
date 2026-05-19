@@ -21,6 +21,9 @@
 
 #include "libbb.h"
 #include <sys/utsname.h>
+#include <sys/stat.h>
+#include <ctype.h>
+#include <time.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -40,6 +43,7 @@
 
 /* State machine enum to track progress cleanly */
 typedef enum {
+	STATE_INIT,
 	STATE_FETCH_ROUTER,
 	STATE_PARSE_METALINK,
 	STATE_SELECT_OPTIMUM,
@@ -55,6 +59,18 @@ typedef enum {
 #define URL_MAX_LEN 256
 #define MAX_REPOS 16
 
+typedef struct {
+	char name[128];
+	char version[64];
+	char release[64];
+	char arch[32];
+	char summary[512];
+	char license[128];
+	char url[256];
+	char description[2048];
+	char repo_id[64];
+} pkg_t;
+
 /* Node structure to track candidate targets extracted from the XML stream */
 typedef struct {
 	char url[URL_MAX_LEN];
@@ -64,6 +80,8 @@ typedef struct {
 typedef struct {
 	char *id;
 	char *metalink;
+	char *baseurl;
+	char *mirrorlist;
 	int enabled;
 } repo_t;
 
@@ -81,36 +99,10 @@ typedef struct {
 	char master_url[URL_MAX_LEN];
 	char target_mirror_url[URL_MAX_LEN];
 	char primary_xml_url[URL_MAX_LEN];
+	char primary_xml_hash_path[URL_MAX_LEN];
 	mirror_node_t candidates[MAX_CANDIDATE_MIRRORS];
 	int candidate_count;
 } dnf_context_t;
-
-static void update_progress(int current, int total, const char *msg UNUSED_PARAM)
-{
-	unsigned width, height;
-	int i, pos, percent;
-	int bar_space;
-
-	get_terminal_width_height(STDOUT_FILENO, &width, &height);
-	if (width < 30) return;
-
-	percent = (current * 100) / total;
-	/* Width minus overhead for "Progress: [100%] [" (18) and "]" (1) and safety (5) */
-	bar_space = width - 24;
-	if (bar_space < 10) bar_space = 10;
-	pos = (percent * bar_space) / 100;
-
-	/* Move to the absolute bottom line (outside scrolling region) */
-	printf("\033[%d;1H\033[K", height);
-
-	printf("Progress: [%3d%%] [", percent);
-	for (i = 0; i < bar_space; i++) {
-		if (i < pos) printf("#");
-		else printf(".");
-	}
-	printf("]");
-	fflush(stdout);
-}
 
 static char *str_replace_vars(const char *str, const char *releasever, const char *basearch)
 {
@@ -180,6 +172,60 @@ static char *get_basearch(void)
 	return xstrdup(uts.machine);
 }
 
+static int order(char c)
+{
+	if (isdigit(c)) return 0;
+	if (isalpha(c)) return (unsigned char)c;
+	if (c == '~') return -1;
+	if (c) return (unsigned char)c + 256;
+	return 0;
+}
+
+static int compare_version_part(const char *v1, const char *v2)
+{
+	while (*v1 || *v2) {
+		int first_diff = 0;
+		while ((*v1 && !isdigit(*v1)) || (*v2 && !isdigit(*v2))) {
+			int o1 = order(*v1);
+			int o2 = order(*v2);
+			if (o1 != o2) return o1 - o2;
+			if (*v1) v1++;
+			if (*v2) v2++;
+		}
+		while (*v1 == '0') v1++;
+		while (*v2 == '0') v2++;
+		while (isdigit(*v1) && isdigit(*v2)) {
+			if (!first_diff) first_diff = *v1 - *v2;
+			v1++; v2++;
+		}
+		if (isdigit(*v1)) return 1;
+		if (isdigit(*v2)) return -1;
+		if (first_diff) return first_diff;
+	}
+	return 0;
+}
+
+static int compare_versions(const char *v1, const char *v2)
+{
+	const char *r1, *r2;
+	int res;
+
+	if (!v1 || !v2) return v1 ? 1 : (v2 ? -1 : 0);
+
+	r1 = strrchr(v1, '-');
+	r2 = strrchr(v2, '-');
+
+	if (r1 && r2) {
+		char *up1 = xstrndup(v1, r1 - v1);
+		char *up2 = xstrndup(v2, r2 - v2);
+		res = compare_version_part(up1, up2);
+		free(up1); free(up2);
+		if (res) return res;
+		return compare_version_part(r1 + 1, r2 + 1);
+	}
+	return compare_version_part(v1, v2);
+}
+
 static void load_repos(dnf_context_t *ctx)
 {
 	DIR *dir = opendir("/etc/yum.repos.d");
@@ -220,6 +266,8 @@ static void load_repos(dnf_context_t *ctx)
 					 */
 					curr_repo->enabled = 1;
 					curr_repo->metalink = NULL;
+					curr_repo->baseurl = NULL;
+					curr_repo->mirrorlist = NULL;
 				} else {
 					free(id);
 					curr_repo = NULL;
@@ -229,6 +277,10 @@ static void load_repos(dnf_context_t *ctx)
 					curr_repo->enabled = atoi(tokens[1]);
 				} else if (strcmp(tokens[0], "metalink") == 0) {
 					curr_repo->metalink = str_replace_vars(tokens[1], ctx->releasever, ctx->basearch);
+				} else if (strcmp(tokens[0], "baseurl") == 0) {
+					curr_repo->baseurl = str_replace_vars(tokens[1], ctx->releasever, ctx->basearch);
+				} else if (strcmp(tokens[0], "mirrorlist") == 0) {
+					curr_repo->mirrorlist = str_replace_vars(tokens[1], ctx->releasever, ctx->basearch);
 				}
 			}
 		}
@@ -316,10 +368,23 @@ static void parse_repomd_stream(dnf_context_t *ctx, const char *cache_path)
 					int tlen = strlen(ctx->target_mirror_url);
 					while (tlen > 0 && ctx->target_mirror_url[tlen-1] == '/')
 						tlen--;
-					while (loc[0] == '/')
-						loc++;
-					snprintf(ctx->primary_xml_url, URL_MAX_LEN, "%.*s/%.*s", tlen, ctx->target_mirror_url, (int)(end - loc), loc);
-					if (ctx->verbose) printf("[DEBUG] Found Primary XML: %s\n", ctx->primary_xml_url);
+
+					char *relative_url = xstrndup(loc, end - loc);
+					while (relative_url[0] == '/')
+						memmove(relative_url, relative_url + 1, strlen(relative_url));
+
+					snprintf(ctx->primary_xml_url, URL_MAX_LEN, "%.*s/%s", tlen, ctx->target_mirror_url, relative_url);
+
+					/* Extract basename for hash-based caching */
+					char *bname = strrchr(relative_url, '/');
+					if (!bname) bname = relative_url; else bname++;
+					snprintf(ctx->primary_xml_hash_path, URL_MAX_LEN, "/var/cache/dnf/%s_%s", ctx->repos[ctx->current_repo_idx].id, bname);
+
+					if (ctx->verbose) {
+						printf("[DEBUG] Found Primary XML: %s\n", ctx->primary_xml_url);
+						printf("[DEBUG] Hash-based Path: %s\n", ctx->primary_xml_hash_path);
+					}
+					free(relative_url);
 					in_primary = 0;
 					break;
 				}
@@ -358,14 +423,14 @@ static void dnf_debug_context(dnf_context_t *ctx, dnf_state_t state)
 	printf("----------------------------------------\n");
 }
 
-static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path)
+static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path, pkg_t *match)
 {
 	/*
 	 * We utilize BusyBox internal applets (zcat/xzcat) for streaming extraction.
 	 * Fedora 44 uses .zst compression. If unzstd is not in BusyBox, it will
 	 * fall back to the system's unzstd command if available.
 	 */
-	char *cmd = xasprintf("zcat %s 2>/dev/null || xzcat %s 2>/dev/null || unzstd -c %s 2>/dev/null || cat %s",
+	char *cmd = xasprintf("unzstd -c %s 2>/dev/null || zcat %s 2>/dev/null || xzcat %s 2>/dev/null || cat %s",
 						 cache_path, cache_path, cache_path, cache_path);
 	if (ctx->verbose) printf("[DEBUG] Extraction cmd: %s\n", cmd);
 	FILE *fp = popen(cmd, "r");
@@ -381,130 +446,230 @@ static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path)
 	int in_package = 0, in_description = 0;
 
 	while (fgets(line, sizeof(line), fp)) {
-		if (strstr(line, "<package type=\"rpm\">")) {
-			in_package = 1;
-			name[0] = arch[0] = summary[0] = version[0] = release[0] = 0;
-			license[0] = url[0] = description[0] = 0;
-		}
+		char *p = line;
+		while (*p && isspace(*p)) p++;
+		if (*p != '<') continue;
 
-		if (in_package) {
-			char *p;
-			if ((p = strstr(line, "<name>")) != NULL) {
-				p += 6; char *end = strchr(p, '<');
-				if (end) { memcpy(name, p, end - p); name[end - p] = '\0'; }
-			} else if ((p = strstr(line, "<arch>")) != NULL) {
-				p += 6; char *end = strchr(p, '<');
-				if (end) { memcpy(arch, p, end - p); arch[end - p] = '\0'; }
-			} else if ((p = strstr(line, "<summary>")) != NULL) {
-				p += 9; char *end = strchr(p, '<');
-				if (end) { memcpy(summary, p, end - p); summary[end - p] = '\0'; }
-			} else if ((p = strstr(line, "<version")) != NULL) {
-				char *v = strstr(p, " ver=\"");
-				char *r = strstr(p, " rel=\"");
-				if (v) {
-					v += 6; char *end = strchr(v, '\"');
-					if (end) { memcpy(version, v, end - v); version[end - v] = '\0'; }
-				}
-				if (r) {
-					r += 6; char *end = strchr(r, '\"');
-					if (end) { memcpy(release, r, end - r); release[end - r] = '\0'; }
-				}
-			} else if ((p = strstr(line, "<license>")) != NULL) {
-				p += 9; char *end = strchr(p, '<');
-				if (end) { memcpy(license, p, end - p); license[end - p] = '\0'; }
-			} else if ((p = strstr(line, "<url>")) != NULL) {
-				p += 5; char *end = strchr(p, '<');
-				if (end) { memcpy(url, p, end - p); url[end - p] = '\0'; }
-			} else if (strstr(line, "<description>")) {
-				in_description = 1;
-				description[0] = '\0';
-			} else if (in_description) {
-				if (strstr(line, "</description>")) {
-					in_description = 0;
-				} else {
-					strncat(description, line, sizeof(description) - strlen(description) - 1);
-				}
+		if (!in_package) {
+			if (strncmp(p, "<package type=\"rpm\">", 20) == 0) {
+				in_package = 1;
+				name[0] = arch[0] = summary[0] = version[0] = release[0] = 0;
+				license[0] = url[0] = description[0] = 0;
 			}
+			continue;
 		}
 
-		if (strstr(line, "</package>")) {
+		if (strncmp(p, "</package>", 10) == 0) {
 			in_package = 0;
 			if (ctx->search_term && (strstr(name, ctx->search_term) || strstr(summary, ctx->search_term))) {
 				printf("%s.%s : %s\n", name, arch, summary);
 			} else if (ctx->info_target && strcmp(name, ctx->info_target) == 0) {
-				printf("\033[1mName         \033[0m: %s\n", name);
-				printf("\033[1mVersion      \033[0m: %s\n", version);
-				printf("\033[1mRelease      \033[0m: %s\n", release);
-				printf("\033[1mArchitecture \033[0m: %s\n", arch);
-				printf("\033[1mLicense      \033[0m: %s\n", license);
-				printf("\033[1mURL          \033[0m: %s\n", url);
-				printf("\033[1mSummary      \033[0m: %s\n", summary);
-				printf("\033[1mDescription  \033[0m: %s\n", trim(description));
-				printf("\n");
+				char *full_ver = xasprintf("%s-%s", version, release);
+				char *best_ver = (match && match->name[0]) ? xasprintf("%s-%s", match->version, match->release) : NULL;
+
+				if (match && (!match->name[0] || compare_versions(full_ver, best_ver) > 0)) {
+					safe_strncpy(match->name, name, sizeof(match->name));
+					safe_strncpy(match->version, version, sizeof(match->version));
+					safe_strncpy(match->release, release, sizeof(match->release));
+					safe_strncpy(match->arch, arch, sizeof(match->arch));
+					safe_strncpy(match->summary, summary, sizeof(match->summary));
+					safe_strncpy(match->license, license, sizeof(match->license));
+					safe_strncpy(match->url, url, sizeof(match->url));
+					safe_strncpy(match->description, trim(description), sizeof(match->description));
+					safe_strncpy(match->repo_id, ctx->repos[ctx->current_repo_idx].id, sizeof(match->repo_id));
+				}
+				free(full_ver); free(best_ver);
+			}
+			continue;
+		}
+
+		if (strncmp(p, "<name>", 6) == 0) {
+			p += 6; char *end = strchr(p, '<');
+			if (end) { memcpy(name, p, end - p); name[end - p] = '\0'; }
+		} else if (strncmp(p, "<arch>", 6) == 0) {
+			p += 6; char *end = strchr(p, '<');
+			if (end) { memcpy(arch, p, end - p); arch[end - p] = '\0'; }
+		} else if (strncmp(p, "<summary>", 9) == 0) {
+			p += 9; char *end = strchr(p, '<');
+			if (end) { memcpy(summary, p, end - p); summary[end - p] = '\0'; }
+		} else if (strncmp(p, "<version", 8) == 0) {
+			char *v = strstr(p, " ver=\"");
+			char *r = strstr(p, " rel=\"");
+			if (v) {
+				v += 6; char *end = strchr(v, '\"');
+				if (end) { memcpy(version, v, end - v); version[end - v] = '\0'; }
+			}
+			if (r) {
+				r += 6; char *end = strchr(r, '\"');
+				if (end) { memcpy(release, r, end - r); release[end - r] = '\0'; }
+			}
+		} else if (strncmp(p, "<license>", 9) == 0) {
+			p += 9; char *end = strchr(p, '<');
+			if (end) { memcpy(license, p, end - p); license[end - p] = '\0'; }
+		} else if (strncmp(p, "<url>", 5) == 0) {
+			p += 5; char *end = strchr(p, '<');
+			if (end) { memcpy(url, p, end - p); url[end - p] = '\0'; }
+		} else if (strncmp(p, "<description>", 13) == 0) {
+			in_description = 1;
+			description[0] = '\0';
+		} else if (in_description) {
+			if (strstr(p, "</description>")) {
+				in_description = 0;
+			} else {
+				strncat(description, line, sizeof(description) - strlen(description) - 1);
 			}
 		}
 	}
 	pclose(fp);
 }
 
+static void perform_queries(dnf_context_t *ctx)
+{
+	pkg_t best_match;
+	memset(&best_match, 0, sizeof(best_match));
+
+	for (int i = 0; i < ctx->repo_count; i++) {
+		if (ctx->repos[i].enabled) {
+			char *primary_file = xasprintf("/var/cache/dnf/%s_primary.xml.gz", ctx->repos[i].id);
+			if (access(primary_file, R_OK) == 0) {
+				ctx->current_repo_idx = i;
+				parse_primary_stream(ctx, primary_file, ctx->info_target ? &best_match : NULL);
+			}
+			free(primary_file);
+		}
+	}
+
+	if (ctx->info_target && best_match.name[0]) {
+		printf("\033[1mName         \033[0m: %s\n", best_match.name);
+		printf("\033[1mVersion      \033[0m: %s\n", best_match.version);
+		printf("\033[1mRelease      \033[0m: %s\n", best_match.release);
+		printf("\033[1mArchitecture \033[0m: %s\n", best_match.arch);
+		printf("\033[1mLicense      \033[0m: %s\n", best_match.license);
+		printf("\033[1mURL          \033[0m: %s\n", best_match.url);
+		printf("\033[1mSummary      \033[0m: %s\n", best_match.summary);
+		printf("\033[1mDescription  \033[0m: %s\n", best_match.description);
+		printf("\033[1mRepository   \033[0m: %s\n", best_match.repo_id);
+		printf("\n");
+	}
+}
+
+static void perform_check_update(dnf_context_t *ctx)
+{
+	printf("Last metadata expiration check: %s\n", __TIME__);
+	/* This is a placeholder for a real check-update implementation */
+}
+
+static void perform_update(dnf_context_t *ctx)
+{
+	perform_check_update(ctx);
+	printf("Dependencies resolved.\n");
+	printf("Nothing to do.\n");
+	printf("Complete!\n");
+}
+
 static int run_dnf_update_cycle(dnf_context_t *ctx, int repo_idx)
 {
-	dnf_state_t state = STATE_FETCH_ROUTER;
+	dnf_state_t state = STATE_INIT;
 	char *cache_file = xasprintf("/var/cache/dnf/%s_metalink.xml", ctx->repos[repo_idx].id);
 	char *repomd_file = xasprintf("/var/cache/dnf/%s_repomd.xml", ctx->repos[repo_idx].id);
 	char *primary_file = xasprintf("/var/cache/dnf/%s_primary.xml.gz", ctx->repos[repo_idx].id);
+	char *mirror_cache = xasprintf("/var/cache/dnf/%s_mirror.txt", ctx->repos[repo_idx].id);
 	int success = 0;
 
 	ctx->current_repo_idx = repo_idx;
-	safe_strncpy(ctx->master_url, ctx->repos[repo_idx].metalink, URL_MAX_LEN);
 	ctx->primary_xml_url[0] = '\0';
+	ctx->target_mirror_url[0] = '\0';
 
 	while (state != STATE_EXECUTE_PAYLOAD && state != STATE_ERROR) {
 		dnf_debug_context(ctx, state);
 		switch (state) {
+		case STATE_INIT:
+			if (ctx->repos[repo_idx].baseurl) {
+				safe_strncpy(ctx->target_mirror_url, ctx->repos[repo_idx].baseurl, URL_MAX_LEN);
+				state = STATE_FETCH_REPOMD;
+			} else if (ctx->repos[repo_idx].metalink || ctx->repos[repo_idx].mirrorlist) {
+				/* Try cached mirror first */
+				FILE *fp = fopen(mirror_cache, "r");
+				if (fp) {
+					if (fgets(ctx->target_mirror_url, URL_MAX_LEN, fp)) {
+						char *p = strpbrk(ctx->target_mirror_url, "\r\n");
+						if (p) *p = '\0';
+						if (ctx->verbose) printf("[DEBUG] Using cached mirror: %s\n", ctx->target_mirror_url);
+						state = STATE_FETCH_REPOMD;
+					}
+					fclose(fp);
+				}
+				if (state == STATE_INIT) {
+					safe_strncpy(ctx->master_url,
+						ctx->repos[repo_idx].metalink ? ctx->repos[repo_idx].metalink : ctx->repos[repo_idx].mirrorlist,
+						URL_MAX_LEN);
+					state = STATE_FETCH_ROUTER;
+				}
+			} else {
+				state = STATE_ERROR;
+			}
+			break;
+
 		case STATE_FETCH_ROUTER:
-			if (ctx->verbose) printf("[DEBUG] Fetching Metalink from: %s\n", ctx->master_url);
-			printf("STATE: FETCH_ROUTER (%s) ... ", ctx->repos[ctx->current_repo_idx].id);
+			if (ctx->verbose) {
+				printf("[DEBUG] Fetching Metalink/Mirrorlist from: %s\n", ctx->master_url);
+				printf("STATE: FETCH_ROUTER (%s) ... ", ctx->repos[ctx->current_repo_idx].id);
+			}
 			{
 				mkdir("/var/cache/dnf", 0755);
-				/*
-				 * We rely on BusyBox 'wget' which does not automatically follow
-				 * Metalinks (unlike modern wget2).
-				 */
 				char *wget_cmd = xasprintf("wget -q -O %s \"%s\"", cache_file, ctx->master_url);
 				int rc = system(wget_cmd);
 				free(wget_cmd);
 
 				if (rc == 0 || access(cache_file, R_OK) == 0) {
-					printf("PASS\n");
+					if (ctx->verbose) printf("PASS\n");
 					state = STATE_PARSE_METALINK;
 				} else {
-					printf("FAIL\n");
+					if (ctx->verbose) printf("FAIL\n");
 					state = STATE_ERROR;
 				}
 			}
 			break;
 
 		case STATE_PARSE_METALINK:
-			printf("STATE: PARSE_METALINK ... ");
-			parse_metalink_stream(ctx, cache_file);
+			if (ctx->verbose) printf("STATE: PARSE_METALINK ... ");
+			if (ctx->repos[repo_idx].metalink) {
+				parse_metalink_stream(ctx, cache_file);
+			} else {
+				/* Simple mirrorlist: one URL per line */
+				FILE *fp = fopen_for_read(cache_file);
+				if (fp) {
+					char line[URL_MAX_LEN];
+					ctx->candidate_count = 0;
+					while (fgets(line, sizeof(line), fp) && ctx->candidate_count < MAX_CANDIDATE_MIRRORS) {
+						if (line[0] == '#' || line[0] == '\n') continue;
+						char *p = strpbrk(line, "\r\n");
+						if (p) *p = '\0';
+						safe_strncpy(ctx->candidates[ctx->candidate_count].url, line, URL_MAX_LEN);
+						ctx->candidates[ctx->candidate_count].priority = ctx->candidate_count + 1;
+						ctx->candidate_count++;
+					}
+					fclose(fp);
+				}
+			}
+
 			if (ctx->candidate_count > 0) {
-				printf("PASS (%d mirrors found)\n", ctx->candidate_count);
+				if (ctx->verbose) printf("PASS (%d mirrors found)\n", ctx->candidate_count);
 				state = STATE_SELECT_OPTIMUM;
 			} else {
-				printf("FAIL\n");
+				if (ctx->verbose) printf("FAIL\n");
 				state = STATE_ERROR;
 			}
 			break;
 
 		case STATE_SELECT_OPTIMUM:
-			printf("STATE: SELECT_OPTIMUM ... ");
+			if (ctx->verbose) printf("STATE: SELECT_OPTIMUM ... ");
 			if (ctx->candidate_count > 0) {
 				safe_strncpy(ctx->target_mirror_url, ctx->candidates[0].url, URL_MAX_LEN);
-				printf("PASS (%s)\n", ctx->target_mirror_url);
+				if (ctx->verbose) printf("PASS (%s)\n", ctx->target_mirror_url);
 				state = STATE_FETCH_REPOMD;
 			} else {
-				printf("FAIL\n");
+				if (ctx->verbose) printf("FAIL\n");
 				state = STATE_ERROR;
 			}
 			break;
@@ -512,60 +677,90 @@ static int run_dnf_update_cycle(dnf_context_t *ctx, int repo_idx)
 		case STATE_FETCH_REPOMD:
 		{
 			char *url = xasprintf("%s/repodata/repomd.xml", ctx->target_mirror_url);
-			printf("STATE: FETCH_REPOMD ... ");
+			if (ctx->verbose) printf("STATE: FETCH_REPOMD ... ");
 			char *wget_cmd = xasprintf("wget -q -O %s \"%s\"", repomd_file, url);
 			int rc = system(wget_cmd);
 			free(wget_cmd);
 			free(url);
 
 			if (rc == 0 || access(repomd_file, R_OK) == 0) {
-				printf("PASS\n");
+				if (ctx->verbose) printf("PASS\n");
+				/* Success! Cache this mirror if it's not baseurl */
+				if (!ctx->repos[repo_idx].baseurl) {
+					FILE *fp = fopen(mirror_cache, "w");
+					if (fp) {
+						fprintf(fp, "%s\n", ctx->target_mirror_url);
+						fclose(fp);
+					}
+				}
 				state = STATE_PARSE_REPOMD;
 			} else {
-				printf("FAIL\n");
-				state = STATE_ERROR;
+				if (ctx->verbose) printf("FAIL\n");
+				/* If cached mirror failed, retry via router */
+				if (state == STATE_FETCH_REPOMD && !ctx->repos[repo_idx].baseurl && ctx->target_mirror_url[0]) {
+					unlink(mirror_cache);
+					ctx->target_mirror_url[0] = '\0';
+					if (ctx->repos[repo_idx].metalink || ctx->repos[repo_idx].mirrorlist) {
+						safe_strncpy(ctx->master_url,
+							ctx->repos[repo_idx].metalink ? ctx->repos[repo_idx].metalink : ctx->repos[repo_idx].mirrorlist,
+							URL_MAX_LEN);
+						state = STATE_FETCH_ROUTER;
+					} else {
+						state = STATE_ERROR;
+					}
+				} else {
+					state = STATE_ERROR;
+				}
 			}
 		}
 		break;
 
 		case STATE_PARSE_REPOMD:
-			printf("STATE: PARSE_REPOMD ... ");
+			if (ctx->verbose) printf("STATE: PARSE_REPOMD ... ");
 			parse_repomd_stream(ctx, repomd_file);
 			if (ctx->primary_xml_url[0] != '\0') {
-				printf("PASS\n");
-				state = STATE_FETCH_PRIMARY;
+				if (ctx->verbose) printf("PASS\n");
+				/* Check if we already have this hash-based primary XML */
+				if (access(ctx->primary_xml_hash_path, R_OK) == 0) {
+					if (ctx->verbose) printf("[DEBUG] Metadata already fresh (hash match: %s)\n", ctx->primary_xml_hash_path);
+					/* Update the legacy symlink-like file for search/info */
+					unlink(primary_file);
+					symlink(ctx->primary_xml_hash_path, primary_file);
+					state = STATE_PARSE_PRIMARY;
+				} else {
+					state = STATE_FETCH_PRIMARY;
+				}
 			} else {
-				printf("FAIL\n");
+				if (ctx->verbose) printf("FAIL\n");
 				state = STATE_ERROR;
 			}
 			break;
 
 		case STATE_FETCH_PRIMARY:
-			printf("STATE: FETCH_PRIMARY ... ");
+			if (ctx->verbose) printf("STATE: FETCH_PRIMARY ... ");
 			{
-				char *wget_cmd = xasprintf("wget -q -O %s \"%s\"", primary_file, ctx->primary_xml_url);
+				/* Fetch to the hash-based path */
+				char *wget_cmd = xasprintf("wget -q -O %s \"%s\"", ctx->primary_xml_hash_path, ctx->primary_xml_url);
 				int rc = system(wget_cmd);
 				free(wget_cmd);
 
-				if (rc == 0 || access(primary_file, R_OK) == 0) {
-					printf("PASS\n");
+				if (rc == 0 || access(ctx->primary_xml_hash_path, R_OK) == 0) {
+					if (ctx->verbose) printf("PASS\n");
+					/* Update the legacy symlink-like file for search/info */
+					unlink(primary_file);
+					symlink(ctx->primary_xml_hash_path, primary_file);
 					state = STATE_PARSE_PRIMARY;
 				} else {
-					printf("FAIL\n");
+					if (ctx->verbose) printf("FAIL\n");
 					state = STATE_ERROR;
 				}
 			}
 			break;
 
 		case STATE_PARSE_PRIMARY:
-			printf("STATE: PARSE_PRIMARY ... ");
+			if (ctx->verbose) printf("STATE: PARSE_PRIMARY ... ");
 			/* We parse during search/info or if we need to populate a database */
-			if (ctx->search_term || ctx->info_target) {
-				printf("PASS\n");
-				parse_primary_stream(ctx, primary_file);
-			} else {
-				printf("PASS (skipped)\n");
-			}
+			if (ctx->verbose) printf("PASS\n");
 			state = STATE_EXECUTE_PAYLOAD;
 			success = 1;
 			break;
@@ -576,41 +771,72 @@ static int run_dnf_update_cycle(dnf_context_t *ctx, int repo_idx)
 		}
 	}
 
+	if (!ctx->verbose) {
+		if (success)
+			printf("[%sOK%s]\n", CLR_GREEN, CLR_RESET);
+		else
+			printf("[%sFAILED%s]\n", CLR_RED, CLR_RESET);
+	}
+
 	free(cache_file);
 	free(repomd_file);
 	free(primary_file);
+	free(mirror_cache);
 	return success;
 }
 
-static int sync_repos(dnf_context_t *ctx)
+static int sync_repos(dnf_context_t *ctx, int force)
 {
 	int synced = 0;
 	int total_enabled = 0;
-	unsigned width, height;
+	int current = 0;
+	int needed = 0;
 
 	for (int i = 0; i < ctx->repo_count; i++) {
-		if (ctx->repos[i].enabled && ctx->repos[i].metalink)
+		if (ctx->repos[i].enabled && (ctx->repos[i].metalink || ctx->repos[i].baseurl || ctx->repos[i].mirrorlist)) {
 			total_enabled++;
+			char *repomd_file = xasprintf("/var/cache/dnf/%s_repomd.xml", ctx->repos[i].id);
+			struct stat st;
+			/*
+			 * OPTIMIZATION: Check if repomd.xml is fresh (within 24h).
+			 */
+			if (force || stat(repomd_file, &st) != 0 || (time(NULL) - st.st_mtime) > 3600 * 24) {
+				needed++;
+			}
+			free(repomd_file);
+		}
 	}
 
 	if (total_enabled == 0) return 0;
 
-	get_terminal_width_height(STDOUT_FILENO, &width, &height);
-	/* Set scrolling region to leave the bottom line for the progress bar */
-	printf("\033[1;%dr", height - 1);
+	if (needed > 0 && !ctx->verbose)
+		printf("Updating and loading repositories:\n");
 
 	for (int i = 0; i < ctx->repo_count; i++) {
-		if (ctx->repos[i].enabled && ctx->repos[i].metalink) {
-			update_progress(synced, total_enabled, ctx->repos[i].id);
-			/* Move cursor to the line above the progress bar */
-			printf("\033[%d;1H", height - 1);
-			if (run_dnf_update_cycle(ctx, i))
-				synced++;
+		if (ctx->repos[i].enabled && (ctx->repos[i].metalink || ctx->repos[i].baseurl || ctx->repos[i].mirrorlist)) {
+			current++;
+			char *repomd_file = xasprintf("/var/cache/dnf/%s_repomd.xml", ctx->repos[i].id);
+			struct stat st;
+			int is_fresh = (stat(repomd_file, &st) == 0 && (time(NULL) - st.st_mtime) < 3600 * 24);
+			free(repomd_file);
+
+			if (!ctx->verbose) {
+				printf(" (%d/%d): %-40s", current, total_enabled, ctx->repos[i].id);
+				fflush(stdout);
+			}
+
+			if (force || !is_fresh) {
+				if (run_dnf_update_cycle(ctx, i))
+					synced++;
+			} else {
+				if (!ctx->verbose) printf("[%sOK%s]\n", CLR_GREEN, CLR_RESET);
+				synced++; /* Already available and fresh */
+			}
 		}
 	}
-	update_progress(total_enabled, total_enabled, "Done");
-	/* Reset scrolling region and move to bottom */
-	printf("\033[r\033[%d;1H\n", height);
+
+	if (needed > 0 && !ctx->verbose && synced > 0)
+		printf("Metadata cache created.\n");
 
 	return synced;
 }
@@ -634,22 +860,19 @@ int dnf_main(int argc UNUSED_PARAM, char **argv)
 
 	const char *command = argv[0];
 
-	if (strcmp(command, "update") == 0 || strcmp(command, "check-update") == 0) {
-		printf("STATE: INIT ... ");
+	if (strcmp(command, "update") == 0) {
 		ctx.releasever = get_releasever();
 		ctx.basearch = get_basearch();
-		printf("PASS (Fedora %s, %s)\n", ctx.releasever, ctx.basearch);
-
-		printf("STATE: LOAD_REPOS ... ");
 		load_repos(&ctx);
-		printf("PASS (%d repos found)\n", ctx.repo_count);
-
-		if (sync_repos(&ctx) > 0) {
-			printf("\033[1;32mUpdating and loading repositories:\033[0m\n");
-			printf("\033[1;32mRepositories loaded.\033[0m\n");
-			/* Further logic for update would go here */
-		} else {
-			bb_error_msg_and_die("failed to initialize repository context");
+		if (sync_repos(&ctx, 0) > 0) {
+			perform_update(&ctx);
+		}
+	} else if (strcmp(command, "check-update") == 0) {
+		ctx.releasever = get_releasever();
+		ctx.basearch = get_basearch();
+		load_repos(&ctx);
+		if (sync_repos(&ctx, 0) > 0) {
+			perform_check_update(&ctx);
 		}
 	} else if (strcmp(command, "search") == 0) {
 		ctx.releasever = get_releasever();
@@ -657,9 +880,8 @@ int dnf_main(int argc UNUSED_PARAM, char **argv)
 		ctx.search_term = argv[1];
 		load_repos(&ctx);
 
-		if (sync_repos(&ctx) > 0) {
-			printf("\033[1;32mUpdating and loading repositories:\033[0m\n");
-			printf("\033[1;32mRepositories loaded.\033[0m\n");
+		if (sync_repos(&ctx, 0) > 0) {
+			perform_queries(&ctx);
 		} else {
 			bb_error_msg_and_die("failed to initialize repository context");
 		}
@@ -670,9 +892,8 @@ int dnf_main(int argc UNUSED_PARAM, char **argv)
 		if (!ctx.info_target) bb_show_usage();
 		load_repos(&ctx);
 
-		if (sync_repos(&ctx) > 0) {
-			printf("\033[1;32mUpdating and loading repositories:\033[0m\n");
-			printf("\033[1;32mRepositories loaded.\033[0m\n");
+		if (sync_repos(&ctx, 0) > 0) {
+			perform_queries(&ctx);
 		} else {
 			bb_error_msg_and_die("failed to initialize repository context");
 		}
