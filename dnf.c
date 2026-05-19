@@ -7,19 +7,24 @@
 
 //applet:IF_DNF(APPLET(dnf, BB_DIR_USR_BIN, BB_SUID_DROP))
 
-//usage:#define dnf_trivial_usage "[-y] COMMAND [PACKAGE...]"
+//usage:#define dnf_trivial_usage "[-yv] COMMAND [PACKAGE...]"
 //usage:#define dnf_full_usage "\n\n"
 //usage:       "High-level package management frontend\n"
 //usage:     "\nOptions:"
-//usage:     "\n\t-y, --assumeyes\tAnswer yes for all questions"
-//usage:     "\n\t-v, --verbose\tVerbose output"
+//usage:     "\n\t-y, --assumeyes\t\tAnswer yes for all questions"
+//usage:     "\n\t-v, --verbose\t\tVerbose output"
 //usage:     "\n\nCommands:"
-//usage:     "\n\tcheck-update\tCheck for available package updates"
-//usage:     "\n\tupdate\t\tUpdate the system"
-//usage:     "\n\tsearch\t\tSearch for a package"
-//usage:     "\n\tinfo\t\tDisplay details about a package"
-//usage:     "\n\tinstall\t\tInstall packages"
-//usage:     "\n\trescue-install\tExtract packages directly (no RPM DB)"
+//usage:     "\n\tupdate\t\t\tUpdate list of available packages (metadata cache)"
+//usage:     "\n\tinstall\t\t\tInstall new packages"
+//usage:     "\n\tremove\t\t\tRemove packages"
+//usage:     "\n\tupgrade\t\t\tUpgrade the system"
+//usage:     "\n\treinstall\t\tReinstall packages (restores files)"
+//usage:     "\n\trescue-install\t\tInstall packages bypassing rpm (uses internal tar/cpio to /)"
+//usage:     "\n\tverify\t\t\tVerify package sanity (check status, deps, and files)"
+//usage:     "\n\tmd5check\t\tVerify package integrity (checks file hashes)"
+//usage:     "\n\tcheck-update\t\tShow packages with available updates"
+//usage:     "\n\tsearch\t\t\tSearch for a package"
+//usage:     "\n\tinfo\t\t\tDisplay details about a package"
 
 #include "libbb.h"
 #include <sys/utsname.h>
@@ -49,6 +54,13 @@ typedef enum {
 	STATE_EXECUTE_PAYLOAD,
 	STATE_ERROR
 } dnf_state_t;
+
+typedef enum {
+	MODE_INSTALL,
+	MODE_UPGRADE,
+	MODE_RESCUE,
+	MODE_REINSTALL
+} install_mode_t;
 
 #define MAX_CANDIDATE_MIRRORS 5
 #define URL_MAX_LEN 256
@@ -91,6 +103,7 @@ typedef struct {
 	char *search_term;
 	char *info_target;
 	int verbose;
+	int assumeyes;
 	repo_t repos[MAX_REPOS];
 	int repo_count;
 	int current_repo_idx;
@@ -463,9 +476,17 @@ static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path, pkg
 			char *pkg_end = strstr(pkg_start, "</package>");
 			int pkg_block_len;
 			char *pkg_buf;
-			char name[256] = {0}, arch[32] = {0}, summary[512] = {0};
-			char epoch[16] = {"0"}, version[64] = {0}, release[64] = {0}, license[128] = {0};
-			char url[256] = {0}, location[512] = {0}, description[2048] = {0}, depends[2048] = {0};
+			char name[256];
+			char arch[32];
+			char summary[512];
+			char epoch[16];
+			char version[64];
+			char release[64];
+			char license[128];
+			char url[256];
+			char location[512];
+			char description[2048];
+			char depends[2048];
 			char *loc_ptr;
 			char *v_tag;
 			char *req_start;
@@ -478,6 +499,19 @@ static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path, pkg
 
 			pkg_block_len = pkg_end - pkg_start;
 			pkg_buf = xstrndup(pkg_start, pkg_block_len);
+
+			memset(name, 0, sizeof(name));
+			memset(arch, 0, sizeof(arch));
+			memset(summary, 0, sizeof(summary));
+			memset(epoch, 0, sizeof(epoch));
+			safe_strncpy(epoch, "0", sizeof(epoch));
+			memset(version, 0, sizeof(version));
+			memset(release, 0, sizeof(release));
+			memset(license, 0, sizeof(license));
+			memset(url, 0, sizeof(url));
+			memset(location, 0, sizeof(location));
+			memset(description, 0, sizeof(description));
+			memset(depends, 0, sizeof(depends));
 
 			get_tag_value(pkg_buf, "name", name, sizeof(name));
 			get_tag_value(pkg_buf, "arch", arch, sizeof(arch));
@@ -524,9 +558,11 @@ static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path, pkg
 					if (sscanf(entry, "%255[^\"]", dep_name) == 1) {
 						int valid = 1;
 						int d;
-						if (dep_name[0] == '\0') valid = 0;
+						int len = strlen(dep_name);
+						
+						if (len < 2 || len > 100) valid = 0;
+						
 						for (d = 0; dep_name[d]; d++) {
-							/* Reject spaces and non-printable ASCII to prevent strtok ghosting */
 							if (dep_name[d] == ' ' || !((unsigned char)dep_name[d] >= 0x20 && (unsigned char)dep_name[d] <= 0x7E)) { 
 								valid = 0; 
 								break; 
@@ -545,7 +581,7 @@ static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path, pkg
 
 			memset(&pkg, 0, sizeof(pkg));
 			pkg.name = name;
-			pkg.epoch = epoch[0] ? epoch : (char *)"0";
+			pkg.epoch = epoch;
 			pkg.version = version;
 			pkg.release = release;
 			pkg.arch = arch;
@@ -747,6 +783,19 @@ static void load_installed_packages(void)
 	}
 }
 
+static int is_package_installed(const char *name)
+{
+	pkg_t key;
+	pkg_t *inst;
+	
+	if (!installed_packages) load_installed_packages();
+	if (num_installed == 0) return 0;
+	
+	key.name = (char *)name;
+	inst = bsearch(&key, installed_packages, num_installed, sizeof(pkg_t), cmp_pkg_name);
+	return inst != NULL;
+}
+
 typedef struct {
 	pkg_t *installed;
 	pkg_t repo_pkg;
@@ -861,11 +910,31 @@ static void perform_check_update(dnf_context_t *ctx)
 	}
 }
 
+static void perform_rescue_install(dnf_context_t *ctx, char **packages, int num_packages, install_mode_t mode);
+
 static void perform_update(dnf_context_t *ctx)
 {
 	perform_check_update(ctx);
 	printf("Dependencies resolved.\n");
-	printf("Nothing to do.\n");
+	
+	if (num_updates > 0) {
+		int i;
+		char **pkgs = xmalloc(num_updates * sizeof(char *));
+		
+		for (i = 0; i < num_updates; i++) {
+			pkgs[i] = xstrdup(update_candidates[i].repo_pkg.name);
+		}
+		
+		printf("Upgrading %d packages...\n", num_updates);
+		perform_rescue_install(ctx, pkgs, num_updates, MODE_UPGRADE);
+		
+		for (i = 0; i < num_updates; i++) {
+			free(pkgs[i]);
+		}
+		free(pkgs);
+	} else {
+		printf("Nothing to do.\n");
+	}
 	printf("Complete!\n");
 }
 
@@ -1224,13 +1293,17 @@ static void get_package_info(dnf_context_t *ctx, const char *name, pkg_t *best_m
 	ctx->info_target = NULL;
 }
 
-static void resolve_dependencies(dnf_context_t *ctx, const char *pkg_name, dep_list_t *list)
+static void resolve_dependencies(dnf_context_t *ctx, const char *pkg_name, dep_list_t *list, install_mode_t mode, int is_target)
 {
 	pkg_t best_match;
 	int i;
 
 	for (i = 0; i < list->count; i++) {
 		if (strcmp(list->pkgs[i], pkg_name) == 0) return;
+	}
+
+	if (!is_target && is_package_installed(pkg_name)) {
+		return;
 	}
 	
 	get_package_info(ctx, pkg_name, &best_match);
@@ -1245,7 +1318,7 @@ static void resolve_dependencies(dnf_context_t *ctx, const char *pkg_name, dep_l
 		char *deps = xstrdup(best_match.depends);
 		char *p = strtok(deps, " ");
 		while (p) {
-			resolve_dependencies(ctx, p, list);
+			resolve_dependencies(ctx, p, list, mode, 0);
 			p = strtok(NULL, " ");
 		}
 		free(deps);
@@ -1257,19 +1330,25 @@ static void resolve_dependencies(dnf_context_t *ctx, const char *pkg_name, dep_l
 	free(best_match.description); free(best_match.depends); free(best_match.repo_id);
 }
 
-static void perform_rescue_install(dnf_context_t *ctx, char **packages, int num_packages, int use_rescue)
+static void perform_rescue_install(dnf_context_t *ctx, char **packages, int num_packages, install_mode_t mode)
 {
 	dep_list_t list = { NULL, 0 };
 	int i;
+	int needed = 0;
 	char *batch_rpms = xstrdup("");
 
 	printf("Resolving dependencies...\n");
 	for (i = 0; i < num_packages; i++) {
-		resolve_dependencies(ctx, packages[i], &list);
+		if (mode == MODE_INSTALL && is_package_installed(packages[i])) {
+			printf("Package %s is already installed.\n", packages[i]);
+			continue;
+		}
+		needed++;
+		resolve_dependencies(ctx, packages[i], &list, mode, 1);
 	}
 	
 	if (list.count == 0) {
-		printf("Nothing to do.\n");
+		if (needed > 0) printf("Nothing to do.\n");
 		free(batch_rpms);
 		return;
 	}
@@ -1316,7 +1395,7 @@ static void perform_rescue_install(dnf_context_t *ctx, char **packages, int num_
 				system(cmd);
 				free(cmd);
 				
-				if (use_rescue) {
+				if (mode == MODE_RESCUE) {
 					printf("Extracting %s (rescue install)...\n", best_match.name);
 					cmd = xasprintf("rpm2cpio %s | cpio -idmuv --quiet", rpm_file);
 					system(cmd);
@@ -1339,10 +1418,14 @@ static void perform_rescue_install(dnf_context_t *ctx, char **packages, int num_
 		}
 	}
 
-	if (!use_rescue && batch_rpms[0] != '\0') {
+	if (mode != MODE_RESCUE && batch_rpms[0] != '\0') {
 		char *cmd;
 		printf("Installing packages in a single transaction...\n");
-		cmd = xasprintf("rpm -Uvh --nodeps --force %s", batch_rpms);
+		if (mode == MODE_REINSTALL) {
+			cmd = xasprintf("rpm -Uvh --replacepkgs --nodeps --force %s", batch_rpms);
+		} else {
+			cmd = xasprintf("rpm -Uvh --nodeps --force %s", batch_rpms);
+		}
 		system(cmd);
 		free(cmd);
 	}
@@ -1350,6 +1433,97 @@ static void perform_rescue_install(dnf_context_t *ctx, char **packages, int num_
 	free(batch_rpms);
 	for (i = 0; i < list.count; i++) free(list.pkgs[i]);
 	free(list.pkgs);
+}
+
+static void format_size(long long bytes, char *buf, int buf_size) {
+	if (bytes < 1024) snprintf(buf, buf_size, "%lld B", bytes);
+	else if (bytes < 1024 * 1024) snprintf(buf, buf_size, "%.1f KiB", bytes / 1024.0);
+	else if (bytes < 1024 * 1024 * 1024) snprintf(buf, buf_size, "%.1f MiB", bytes / (1024.0 * 1024.0));
+	else snprintf(buf, buf_size, "%.1f GiB", bytes / (1024.0 * 1024.0 * 1024.0));
+}
+
+static void perform_remove(dnf_context_t *ctx, char **packages, int num_packages) {
+	char *batch = xstrdup("");
+	long long total_size = 0;
+	int i, count = 0;
+	char size_buf[32];
+	char total_buf[32];
+
+	printf("Package                                 Arch       Version                                Repository        Size\n");
+	printf("Removing:\n");
+
+	for (i = 0; i < num_packages; i++) {
+		char cmd[512];
+		FILE *fp;
+		char line[1024];
+
+		snprintf(cmd, sizeof(cmd), "rpm -q --qf '%%{NAME}|%%{ARCH}|%%{EPOCH}:%%{VERSION}-%%{RELEASE}|%%{SIZE}\\n' %s 2>/dev/null", packages[i]);
+		fp = popen(cmd, "r");
+		if (fp) {
+			while (fgets(line, sizeof(line), fp)) {
+				char *name = strtok(line, "|");
+				char *arch = strtok(NULL, "|");
+				char *evr = strtok(NULL, "|");
+				char *size_str = strtok(NULL, "\n");
+
+				if (name && arch && evr && size_str) {
+					char *tmp;
+					long long size = atoll(size_str);
+					total_size += size;
+					format_size(size, size_buf, sizeof(size_buf));
+					
+					if (strncmp(evr, "(none):", 7) == 0) evr += 7;
+					else if (strncmp(evr, "0:", 2) == 0) evr += 2;
+
+					printf(" %-38s %-10s %-38s %-17s %s\n", name, arch, evr, "<unknown>", size_buf);
+
+					tmp = xasprintf("%s %s", batch, name);
+					free(batch);
+					batch = tmp;
+					count++;
+				}
+			}
+			pclose(fp);
+		}
+	}
+
+	if (count == 0) {
+		printf("No match for argument: %s\n", packages[0]);
+		printf("Nothing to do.\n");
+		free(batch);
+		return;
+	}
+
+	printf("\nTransaction Summary:\n");
+	printf(" Removing:           %d package%s\n\n", count, count > 1 ? "s" : "");
+
+	format_size(total_size, total_buf, sizeof(total_buf));
+	printf("After this operation, %s will be freed (install 0 B, remove %s).\n", total_buf, total_buf);
+
+	if (!ctx->assumeyes) {
+		char answer[16];
+		printf("Is this ok [y/N]: ");
+		fflush(stdout);
+		if (!fgets(answer, sizeof(answer), stdin) || (answer[0] != 'y' && answer[0] != 'Y')) {
+			printf("Operation aborted.\n");
+			free(batch);
+			return;
+		}
+	}
+
+	printf("Running transaction\n");
+	printf("[1/2] Prepare transaction                                                       100%% \n");
+	
+	{
+		char *exec_cmd = xasprintf("rpm -e --nodeps %s", batch);
+		system(exec_cmd);
+		free(exec_cmd);
+	}
+
+	printf("[2/2] Removing packages...                                                      100%% \n");
+	printf("Complete!\n");
+
+	free(batch);
 }
 
 int dnf_main(int argc, char **argv) MAIN_EXTERNALLY_VISIBLE;
@@ -1362,6 +1536,7 @@ int dnf_main(int argc UNUSED_PARAM, char **argv)
 	memset(&ctx, 0, sizeof(ctx));
 
 	opts = getopt32(argv, "yv");
+	if (opts & 1) ctx.assumeyes = 1;
 	if (opts & 2) ctx.verbose = 1;
 	argv += optind;
 
@@ -1371,6 +1546,15 @@ int dnf_main(int argc UNUSED_PARAM, char **argv)
 	command = argv[0];
 
 	if (strcmp(command, "update") == 0) {
+		ctx.releasever = get_releasever();
+		ctx.basearch = get_basearch();
+		load_repos(&ctx);
+		if (sync_repos(&ctx, 1) > 0) {
+			printf("Repository lists successfully updated.\n");
+		} else {
+			printf("No repositories updated.\n");
+		}
+	} else if (strcmp(command, "upgrade") == 0) {
 		ctx.releasever = get_releasever();
 		ctx.basearch = get_basearch();
 		load_repos(&ctx);
@@ -1410,18 +1594,59 @@ int dnf_main(int argc UNUSED_PARAM, char **argv)
 		} else {
 			bb_error_msg_and_die("failed to initialize repository context");
 		}
-	} else if (strcmp(command, "install") == 0 || strcmp(command, "rescue-install") == 0) {
+	} else if (strcmp(command, "install") == 0 || strcmp(command, "rescue-install") == 0 || strcmp(command, "reinstall") == 0) {
 		int num_pkgs = 0;
+		install_mode_t mode = MODE_INSTALL;
+
 		if (!argv[1]) bb_show_usage();
+		
+		if (strcmp(command, "rescue-install") == 0) mode = MODE_RESCUE;
+		else if (strcmp(command, "reinstall") == 0) mode = MODE_REINSTALL;
+
 		ctx.releasever = get_releasever();
 		ctx.basearch = get_basearch();
 		load_repos(&ctx);
 		if (sync_repos(&ctx, 0) > 0) {
 			while (argv[num_pkgs + 1]) num_pkgs++;
-			perform_rescue_install(&ctx, argv + 1, num_pkgs, (command[0] == 'r'));
+			perform_rescue_install(&ctx, argv + 1, num_pkgs, mode);
 		} else {
 			bb_error_msg_and_die("failed to initialize repository context");
 		}
+	} else if (strcmp(command, "remove") == 0) {
+		int num_pkgs = 0;
+		if (!argv[1]) bb_show_usage();
+		while (argv[num_pkgs + 1]) num_pkgs++;
+		
+		ctx.releasever = get_releasever();
+		ctx.basearch = get_basearch();
+		perform_remove(&ctx, argv + 1, num_pkgs);
+	} else if (strcmp(command, "verify") == 0 || strcmp(command, "md5check") == 0) {
+		int num_pkgs = 0;
+		char *batch;
+		char *cmd;
+		int i;
+
+		if (!argv[1]) bb_show_usage();
+		while (argv[num_pkgs + 1]) num_pkgs++;
+
+		batch = xstrdup("");
+		for (i = 1; i <= num_pkgs; i++) {
+			char *tmp = xasprintf("%s %s", batch, argv[i]);
+			free(batch);
+			batch = tmp;
+		}
+
+		if (strcmp(command, "md5check") == 0) {
+			cmd = xasprintf("rpm -V --nomtime --nosize --nouser --nogroup --nomode %s", batch);
+			printf("Verifying package integrity (hashes)...\n");
+		} else {
+			cmd = xasprintf("rpm -V %s", batch);
+			printf("Verifying package sanity...\n");
+		}
+		
+		system(cmd);
+		free(cmd);
+		free(batch);
 	} else {
 		bb_error_msg_and_die("command '%s' not yet implemented", command);
 	}
