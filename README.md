@@ -37,6 +37,21 @@ Features:
     focusing on core dependencies.
 
 ----------------
+Repository Configuration:
+
+  `busybox_dnf` requires valid repository configuration files to function. It
+  looks for `.repo` files in `/etc/yum.repos.d/`. 
+
+  * **Environment Support**: If you are running `busybox_dnf` on a non-RPM
+    distribution, you **must** manually create
+    `/etc/yum.repos.d/` and provide at least one valid repository file.
+  * **Repository Files**: Each `.repo` file should follow the standard YUM/DNF
+    format (with `[id]`, `baseurl=` or `metalink=`, and `enabled=1`).
+  * **Architecture**: The applet automatically detects your system architecture
+    and version, but these can be overridden via environment variables if
+    needed for cross-environment recovery.
+
+----------------
 Using busybox_dnf:
 ```text
   Usage: dnf [-y] COMMAND [PACKAGE...]
