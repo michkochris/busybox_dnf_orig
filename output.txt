@@ -1,0 +1,255 @@
+[ Zephyrus /mnt/c/Users/michk/Downloads/projects/busybox-1.37.0 ]# ./busybox dnf -v
+BusyBox v1.37.0 (2026-05-19 13:37:28 EDT) multi-call binary.
+
+Usage: dnf [-y] COMMAND [PACKAGE...]
+
+High-level package management frontend
+
+Options:
+        -y, --assumeyes Answer yes for all questions
+        -v, --verbose   Verbose output
+
+Commands:
+        check-update    Check for available package updates
+        update          Update the system
+        search          Search for a package
+        info            Display details about a package
+[ Zephyrus /mnt/c/Users/michk/Downloads/projects/busybox-1.37.0 ]# ./busybox dnf -v update
+[DEBUG] Parsing repo file: /etc/yum.repos.d/fedora-updates.repo
+[DEBUG] Parsing repo file: /etc/yum.repos.d/fedora-updates-testing.repo
+[DEBUG] Parsing repo file: /etc/yum.repos.d/fedora.repo
+[DEBUG] Parsing repo file: /etc/yum.repos.d/fedora-cisco-openh264.repo
+
+[DEBUG] FSM State Change -> 0
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora (Index: 7/12)
+  [URL]     Master:
+----------------------------------------
+[DEBUG] Using cached mirror: http://mirror.web-ster.com/fedora/releases/44/Everything/x86_64/os
+
+[DEBUG] FSM State Change -> 4
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora (Index: 7/12)
+  [URL]     Master:
+  [URL]     Active Mirror: http://mirror.web-ster.com/fedora/releases/44/Everything/x86_64/os
+----------------------------------------
+STATE: FETCH_REPOMD ... PASS
+
+[DEBUG] FSM State Change -> 5
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora (Index: 7/12)
+  [URL]     Master:
+  [URL]     Active Mirror: http://mirror.web-ster.com/fedora/releases/44/Everything/x86_64/os
+----------------------------------------
+STATE: PARSE_REPOMD ... [DEBUG] Found Primary XML: http://mirror.web-ster.com/fedora/releases/44/Everything/x86_64/os/repodata/c48e47563bbf65b996c95caf4a608223f982c314cab637e6ab87dd1df67b9d26-primary.xml.zst
+[DEBUG] Hash-based Path: /var/cache/dnf/fedora_c48e47563bbf65b996c95caf4a608223f982c314cab637e6ab87dd1df67b9d26-primary.xml.zst
+PASS
+[DEBUG] Metadata already fresh (hash match: /var/cache/dnf/fedora_c48e47563bbf65b996c95caf4a608223f982c314cab637e6ab87dd1df67b9d26-primary.xml.zst)
+
+[DEBUG] FSM State Change -> 7
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora (Index: 7/12)
+  [URL]     Master:
+  [URL]     Active Mirror: http://mirror.web-ster.com/fedora/releases/44/Everything/x86_64/os
+  [Data]    Primary Metadata URL: http://mirror.web-ster.com/fedora/releases/44/Everything/x86_64/os/repodata/c48e47563bbf65b996c95caf4a608223f982c314cab637e6ab87dd1df67b9d26-primary.xml.zst
+----------------------------------------
+STATE: PARSE_PRIMARY ... PASS
+
+[DEBUG] FSM State Change -> 0
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora-cisco-openh264 (Index: 10/12)
+  [URL]     Master:
+----------------------------------------
+[DEBUG] Using cached mirror: https://codecs.fedoraproject.org/openh264/44/x86_64
+
+[DEBUG] FSM State Change -> 4
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora-cisco-openh264 (Index: 10/12)
+  [URL]     Master:
+  [URL]     Active Mirror: https://codecs.fedoraproject.org/openh264/44/x86_64
+----------------------------------------
+STATE: FETCH_REPOMD ... PASS
+
+[DEBUG] FSM State Change -> 5
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora-cisco-openh264 (Index: 10/12)
+  [URL]     Master:
+  [URL]     Active Mirror: https://codecs.fedoraproject.org/openh264/44/x86_64
+----------------------------------------
+STATE: PARSE_REPOMD ... [DEBUG] Found Primary XML: https://codecs.fedoraproject.org/openh264/44/x86_64/repodata/ef464269998980f44c8b2c94cf023d2343751c9c2325e8197a457b378f451226-primary.xml.zst
+[DEBUG] Hash-based Path: /var/cache/dnf/fedora-cisco-openh264_ef464269998980f44c8b2c94cf023d2343751c9c2325e8197a457b378f451226-primary.xml.zst
+PASS
+[DEBUG] Metadata already fresh (hash match: /var/cache/dnf/fedora-cisco-openh264_ef464269998980f44c8b2c94cf023d2343751c9c2325e8197a457b378f451226-primary.xml.zst)
+
+[DEBUG] FSM State Change -> 7
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora-cisco-openh264 (Index: 10/12)
+  [URL]     Master:
+  [URL]     Active Mirror: https://codecs.fedoraproject.org/openh264/44/x86_64
+  [Data]    Primary Metadata URL: https://codecs.fedoraproject.org/openh264/44/x86_64/repodata/ef464269998980f44c8b2c94cf023d2343751c9c2325e8197a457b378f451226-primary.xml.zst
+----------------------------------------
+STATE: PARSE_PRIMARY ... PASS
+[DEBUG] Extraction cmd: unzstd -c /var/cache/dnf/updates_primary.xml.gz 2>/dev/null || zcat /var/cache/dnf/updates_primary.xml.gz 2>/dev/null || xzcat /var/cache/dnf/updates_primary.xml.gz 2>/dev/null || cat /var/cache/dnf/updates_primary.xml.gz
+[DEBUG] Extraction cmd: unzstd -c /var/cache/dnf/fedora_primary.xml.gz 2>/dev/null || zcat /var/cache/dnf/fedora_primary.xml.gz 2>/dev/null || xzcat /var/cache/dnf/fedora_primary.xml.gz 2>/dev/null || cat /var/cache/dnf/fedora_primary.xml.gz
+[DEBUG] Extraction cmd: unzstd -c /var/cache/dnf/fedora-cisco-openh264_primary.xml.gz 2>/dev/null || zcat /var/cache/dnf/fedora-cisco-openh264_primary.xml.gz 2>/dev/null || xzcat /var/cache/dnf/fedora-cisco-openh264_primary.xml.gz 2>/dev/null || cat /var/cache/dnf/fedora-cisco-openh264_primary.xml.gz
+Repositories loaded.
+Dependencies resolved.
+Nothing to do.
+Complete!
+[ Zephyrus /mnt/c/Users/michk/Downloads/projects/busybox-1.37.0 ]# ./busybox dnf search nano -v
+[DEBUG] Parsing repo file: /etc/yum.repos.d/fedora-updates.repo
+[DEBUG] Parsing repo file: /etc/yum.repos.d/fedora-updates-testing.repo
+[DEBUG] Parsing repo file: /etc/yum.repos.d/fedora.repo
+[DEBUG] Parsing repo file: /etc/yum.repos.d/fedora-cisco-openh264.repo
+
+[DEBUG] FSM State Change -> 0
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora (Index: 7/12)
+  [URL]     Master:
+----------------------------------------
+[DEBUG] Using cached mirror: http://mirror.web-ster.com/fedora/releases/44/Everything/x86_64/os
+
+[DEBUG] FSM State Change -> 4
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora (Index: 7/12)
+  [URL]     Master:
+  [URL]     Active Mirror: http://mirror.web-ster.com/fedora/releases/44/Everything/x86_64/os
+----------------------------------------
+STATE: FETCH_REPOMD ... PASS
+
+[DEBUG] FSM State Change -> 5
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora (Index: 7/12)
+  [URL]     Master:
+  [URL]     Active Mirror: http://mirror.web-ster.com/fedora/releases/44/Everything/x86_64/os
+----------------------------------------
+STATE: PARSE_REPOMD ... [DEBUG] Found Primary XML: http://mirror.web-ster.com/fedora/releases/44/Everything/x86_64/os/repodata/c48e47563bbf65b996c95caf4a608223f982c314cab637e6ab87dd1df67b9d26-primary.xml.zst
+[DEBUG] Hash-based Path: /var/cache/dnf/fedora_c48e47563bbf65b996c95caf4a608223f982c314cab637e6ab87dd1df67b9d26-primary.xml.zst
+PASS
+[DEBUG] Metadata already fresh (hash match: /var/cache/dnf/fedora_c48e47563bbf65b996c95caf4a608223f982c314cab637e6ab87dd1df67b9d26-primary.xml.zst)
+
+[DEBUG] FSM State Change -> 7
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora (Index: 7/12)
+  [URL]     Master:
+  [URL]     Active Mirror: http://mirror.web-ster.com/fedora/releases/44/Everything/x86_64/os
+  [Data]    Primary Metadata URL: http://mirror.web-ster.com/fedora/releases/44/Everything/x86_64/os/repodata/c48e47563bbf65b996c95caf4a608223f982c314cab637e6ab87dd1df67b9d26-primary.xml.zst
+----------------------------------------
+STATE: PARSE_PRIMARY ... PASS
+
+[DEBUG] FSM State Change -> 0
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora-cisco-openh264 (Index: 10/12)
+  [URL]     Master:
+----------------------------------------
+[DEBUG] Using cached mirror: https://codecs.fedoraproject.org/openh264/44/x86_64
+
+[DEBUG] FSM State Change -> 4
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora-cisco-openh264 (Index: 10/12)
+  [URL]     Master:
+  [URL]     Active Mirror: https://codecs.fedoraproject.org/openh264/44/x86_64
+----------------------------------------
+STATE: FETCH_REPOMD ... PASS
+
+[DEBUG] FSM State Change -> 5
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora-cisco-openh264 (Index: 10/12)
+  [URL]     Master:
+  [URL]     Active Mirror: https://codecs.fedoraproject.org/openh264/44/x86_64
+----------------------------------------
+STATE: PARSE_REPOMD ... [DEBUG] Found Primary XML: https://codecs.fedoraproject.org/openh264/44/x86_64/repodata/ef464269998980f44c8b2c94cf023d2343751c9c2325e8197a457b378f451226-primary.xml.zst
+[DEBUG] Hash-based Path: /var/cache/dnf/fedora-cisco-openh264_ef464269998980f44c8b2c94cf023d2343751c9c2325e8197a457b378f451226-primary.xml.zst
+PASS
+[DEBUG] Metadata already fresh (hash match: /var/cache/dnf/fedora-cisco-openh264_ef464269998980f44c8b2c94cf023d2343751c9c2325e8197a457b378f451226-primary.xml.zst)
+
+[DEBUG] FSM State Change -> 7
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora-cisco-openh264 (Index: 10/12)
+  [URL]     Master:
+  [URL]     Active Mirror: https://codecs.fedoraproject.org/openh264/44/x86_64
+  [Data]    Primary Metadata URL: https://codecs.fedoraproject.org/openh264/44/x86_64/repodata/ef464269998980f44c8b2c94cf023d2343751c9c2325e8197a457b378f451226-primary.xml.zst
+----------------------------------------
+STATE: PARSE_PRIMARY ... PASS
+[DEBUG] Extraction cmd: unzstd -c /var/cache/dnf/updates_primary.xml.gz 2>/dev/null || zcat /var/cache/dnf/updates_primary.xml.gz 2>/dev/null || xzcat /var/cache/dnf/updates_primary.xml.gz 2>/dev/null || cat /var/cache/dnf/updates_primary.xml.gz
+[DEBUG] Extraction cmd: unzstd -c /var/cache/dnf/fedora_primary.xml.gz 2>/dev/null || zcat /var/cache/dnf/fedora_primary.xml.gz 2>/dev/null || xzcat /var/cache/dnf/fedora_primary.xml.gz 2>/dev/null || cat /var/cache/dnf/fedora_primary.xml.gz
+[DEBUG] Extraction cmd: unzstd -c /var/cache/dnf/fedora-cisco-openh264_primary.xml.gz 2>/dev/null || zcat /var/cache/dnf/fedora-cisco-openh264_primary.xml.gz 2>/dev/null || xzcat /var/cache/dnf/fedora-cisco-openh264_primary.xml.gz 2>/dev/null || cat /var/cache/dnf/fedora-cisco-openh264_primary.xml.gz
+[ Zephyrus /mnt/c/Users/michk/Downloads/projects/busybox-1.37.0 ]# ./busybox dnf info nano -v
+[DEBUG] Parsing repo file: /etc/yum.repos.d/fedora-updates.repo
+[DEBUG] Parsing repo file: /etc/yum.repos.d/fedora-updates-testing.repo
+[DEBUG] Parsing repo file: /etc/yum.repos.d/fedora.repo
+[DEBUG] Parsing repo file: /etc/yum.repos.d/fedora-cisco-openh264.repo
+
+[DEBUG] FSM State Change -> 0
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora (Index: 7/12)
+  [URL]     Master:
+----------------------------------------
+[DEBUG] Using cached mirror: http://mirror.web-ster.com/fedora/releases/44/Everything/x86_64/os
+
+[DEBUG] FSM State Change -> 4
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora (Index: 7/12)
+  [URL]     Master:
+  [URL]     Active Mirror: http://mirror.web-ster.com/fedora/releases/44/Everything/x86_64/os
+----------------------------------------
+STATE: FETCH_REPOMD ... PASS
+
+[DEBUG] FSM State Change -> 5
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora (Index: 7/12)
+  [URL]     Master:
+  [URL]     Active Mirror: http://mirror.web-ster.com/fedora/releases/44/Everything/x86_64/os
+----------------------------------------
+STATE: PARSE_REPOMD ... [DEBUG] Found Primary XML: http://mirror.web-ster.com/fedora/releases/44/Everything/x86_64/os/repodata/c48e47563bbf65b996c95caf4a608223f982c314cab637e6ab87dd1df67b9d26-primary.xml.zst
+[DEBUG] Hash-based Path: /var/cache/dnf/fedora_c48e47563bbf65b996c95caf4a608223f982c314cab637e6ab87dd1df67b9d26-primary.xml.zst
+PASS
+[DEBUG] Metadata already fresh (hash match: /var/cache/dnf/fedora_c48e47563bbf65b996c95caf4a608223f982c314cab637e6ab87dd1df67b9d26-primary.xml.zst)
+
+[DEBUG] FSM State Change -> 7
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora (Index: 7/12)
+  [URL]     Master:
+  [URL]     Active Mirror: http://mirror.web-ster.com/fedora/releases/44/Everything/x86_64/os
+  [Data]    Primary Metadata URL: http://mirror.web-ster.com/fedora/releases/44/Everything/x86_64/os/repodata/c48e47563bbf65b996c95caf4a608223f982c314cab637e6ab87dd1df67b9d26-primary.xml.zst
+----------------------------------------
+STATE: PARSE_PRIMARY ... PASS
+
+[DEBUG] FSM State Change -> 0
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora-cisco-openh264 (Index: 10/12)
+  [URL]     Master:
+----------------------------------------
+[DEBUG] Using cached mirror: https://codecs.fedoraproject.org/openh264/44/x86_64
+
+[DEBUG] FSM State Change -> 4
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora-cisco-openh264 (Index: 10/12)
+  [URL]     Master:
+  [URL]     Active Mirror: https://codecs.fedoraproject.org/openh264/44/x86_64
+----------------------------------------
+STATE: FETCH_REPOMD ... PASS
+
+[DEBUG] FSM State Change -> 5
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora-cisco-openh264 (Index: 10/12)
+  [URL]     Master:
+  [URL]     Active Mirror: https://codecs.fedoraproject.org/openh264/44/x86_64
+----------------------------------------
+STATE: PARSE_REPOMD ... [DEBUG] Found Primary XML: https://codecs.fedoraproject.org/openh264/44/x86_64/repodata/ef464269998980f44c8b2c94cf023d2343751c9c2325e8197a457b378f451226-primary.xml.zst
+[DEBUG] Hash-based Path: /var/cache/dnf/fedora-cisco-openh264_ef464269998980f44c8b2c94cf023d2343751c9c2325e8197a457b378f451226-primary.xml.zst
+PASS
+[DEBUG] Metadata already fresh (hash match: /var/cache/dnf/fedora-cisco-openh264_ef464269998980f44c8b2c94cf023d2343751c9c2325e8197a457b378f451226-primary.xml.zst)
+
+[DEBUG] FSM State Change -> 7
+  [Context] Release: 44 | Arch: x86_64
+  [Repo]    ID: fedora-cisco-openh264 (Index: 10/12)
+  [URL]     Master:
+  [URL]     Active Mirror: https://codecs.fedoraproject.org/openh264/44/x86_64
+  [Data]    Primary Metadata URL: https://codecs.fedoraproject.org/openh264/44/x86_64/repodata/ef464269998980f44c8b2c94cf023d2343751c9c2325e8197a457b378f451226-primary.xml.zst
+----------------------------------------
+STATE: PARSE_PRIMARY ... PASS
+[DEBUG] Extraction cmd: unzstd -c /var/cache/dnf/updates_primary.xml.gz 2>/dev/null || zcat /var/cache/dnf/updates_primary.xml.gz 2>/dev/null || xzcat /var/cache/dnf/updates_primary.xml.gz 2>/dev/null || cat /var/cache/dnf/updates_primary.xml.gz
+[DEBUG] Extraction cmd: unzstd -c /var/cache/dnf/fedora_primary.xml.gz 2>/dev/null || zcat /var/cache/dnf/fedora_primary.xml.gz 2>/dev/null || xzcat /var/cache/dnf/fedora_primary.xml.gz 2>/dev/null || cat /var/cache/dnf/fedora_primary.xml.gz
+[DEBUG] Extraction cmd: unzstd -c /var/cache/dnf/fedora-cisco-openh264_primary.xml.gz 2>/dev/null || zcat /var/cache/dnf/fedora-cisco-openh264_primary.xml.gz 2>/dev/null || xzcat /var/cache/dnf/fedora-cisco-openh264_primary.xml.gz 2>/dev/null || cat /var/cache/dnf/fedora-cisco-openh264_primary.xml.gz
+[ Zephyrus /mnt/c/Users/michk/Downloads/projects/busybox-1.37.0 ]#

@@ -30,8 +30,8 @@ fi
 
 if ! grep -q "busybox_dnf/" Makefile; then
     echo "Integrating DNF into Makefile..."
-    # Using a more robust sed pattern to insert busybox_dnf/ into the libs-y list
-    sed -i '/libs-y[[:space:]]*:=/a \\t\tbusybox_dnf/ \\' Makefile
+    # Using a more robust sed pattern to insert busybox_dnf/ only into the main directory list
+    sed -i '/libs-y[[:space:]]*:=[[:space:]]*\\$/a \\t\tbusybox_dnf/ \\' Makefile
 fi
 
 # 1. Generate default configuration
