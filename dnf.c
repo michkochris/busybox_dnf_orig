@@ -29,6 +29,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 /* ANSI Colors */
 #define CLR_GREEN  "\033[0;32m"
@@ -62,6 +63,7 @@ typedef struct pkg_s {
 	char *summary;
 	char *license;
 	char *url;
+	char *location;
 	char *description;
 	char *repo_id;
 	char *depends;
@@ -283,12 +285,10 @@ static void load_repos(dnf_context_t *ctx)
 
 static void parse_metalink_stream(dnf_context_t *ctx, const char *cache_path)
 {
-	FILE *fp;
+	FILE *fp = fopen_for_read(cache_path);
 	char line[512];
 
-	fp = fopen_for_read(cache_path);
-	if (!fp)
-		return;
+	if (!fp) return;
 
 	ctx->candidate_count = 0;
 
@@ -327,13 +327,11 @@ static void parse_metalink_stream(dnf_context_t *ctx, const char *cache_path)
 
 static void parse_repomd_stream(dnf_context_t *ctx, const char *cache_path)
 {
-	FILE *fp;
+	FILE *fp = fopen_for_read(cache_path);
 	char line[1024];
 	int in_primary = 0;
 
-	fp = fopen_for_read(cache_path);
-	if (!fp)
-		return;
+	if (!fp) return;
 
 	while (fgets(line, sizeof(line), fp)) {
 		if (strstr(line, "<data type=\"primary\">")) {
@@ -417,7 +415,7 @@ static char *get_tag_value(const char *buf, const char *tag, char *dest, int max
 	snprintf(open_tag, sizeof(open_tag), "<%s>", tag);
 	snprintf(close_tag, sizeof(close_tag), "</%s>", tag);
 
-	start = strstr(buf, open_tag);
+	start = (char *)strstr(buf, open_tag);
 	if (!start) return NULL;
 	start += strlen(open_tag);
 
@@ -441,35 +439,45 @@ static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path, pkg
 
 	cmd = xasprintf("unzstd -c %s 2>/dev/null || zcat %s 2>/dev/null || xzcat %s 2>/dev/null || cat %s",
 						 cache_path, cache_path, cache_path, cache_path);
-	if (ctx->verbose) printf("[DEBUG] Extraction cmd: %s\n", cmd);
 	fp = popen(cmd, "r");
 	free(cmd);
 
-	if (!fp)
-		return;
+	if (!fp) return;
 
 	buf = xmalloc(buf_cap);
 
 	while (1) {
-		int bytes_read = fread(buf + buf_len, 1, buf_cap - buf_len - 1, fp);
+		int bytes_read;
+		char *search_ptr;
+		char *pkg_start;
+		int consumed;
+
+		bytes_read = fread(buf + buf_len, 1, buf_cap - buf_len - 1, fp);
 		if (bytes_read <= 0) break;
 		buf_len += bytes_read;
 		buf[buf_len] = '\0';
 
-		char *pkg_start;
-		while ((pkg_start = strstr(buf, "<package type=\"rpm\">")) != NULL) {
+		search_ptr = buf;
+
+		while ((pkg_start = strstr(search_ptr, "<package type=\"rpm\">")) != NULL) {
 			char *pkg_end = strstr(pkg_start, "</package>");
+			int pkg_block_len;
+			char *pkg_buf;
+			char name[256] = {0}, arch[32] = {0}, summary[512] = {0};
+			char epoch[16] = {"0"}, version[64] = {0}, release[64] = {0}, license[128] = {0};
+			char url[256] = {0}, location[512] = {0}, description[2048] = {0}, depends[2048] = {0};
+			char *loc_ptr;
+			char *v_tag;
+			char *req_start;
+			pkg_t pkg;
+
 			if (!pkg_end) {
 				break;
 			}
 			pkg_end += 10;
 
-			int pkg_block_len = pkg_end - pkg_start;
-			char *pkg_buf = xstrndup(pkg_start, pkg_block_len);
-
-			char name[256] = {0}, arch[32] = {0}, summary[512] = {0};
-			char epoch[16] = {"0"}, version[64] = {0}, release[64] = {0}, license[128] = {0};
-			char url[256] = {0}, description[2048] = {0}, depends[2048] = {0};
+			pkg_block_len = pkg_end - pkg_start;
+			pkg_buf = xstrndup(pkg_start, pkg_block_len);
 
 			get_tag_value(pkg_buf, "name", name, sizeof(name));
 			get_tag_value(pkg_buf, "arch", arch, sizeof(arch));
@@ -478,7 +486,19 @@ static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path, pkg
 			get_tag_value(pkg_buf, "url", url, sizeof(url));
 			get_tag_value(pkg_buf, "description", description, sizeof(description));
 
-			char *v_tag = strstr(pkg_buf, "<version");
+			loc_ptr = strstr(pkg_buf, "<location href=\"");
+			if (loc_ptr) {
+				char *loc_end;
+				loc_ptr += 16;
+				loc_end = strchr(loc_ptr, '\"');
+				if (loc_end && (loc_end - loc_ptr) < (int)sizeof(location)) {
+					int l_len = loc_end - loc_ptr;
+					memcpy(location, loc_ptr, l_len);
+					location[l_len] = '\0';
+				}
+			}
+
+			v_tag = strstr(pkg_buf, "<version");
 			if (v_tag) {
 				char *e = strstr(v_tag, "epoch=\"");
 				char *v = strstr(v_tag, "ver=\"");
@@ -488,24 +508,41 @@ static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path, pkg
 				if (r) { sscanf(r, "rel=\"%63[^\"]\"", release); }
 			}
 
-			char *req_start = strstr(pkg_buf, "<rpm:requires>");
+			req_start = strstr(pkg_buf, "<rpm:requires>");
 			if (req_start) {
 				char *req_end = strstr(req_start, "</rpm:requires>");
 				char *entry = req_start;
 				while (entry && (!req_end || entry < req_end)) {
+					char dep_name[256];
+					
 					entry = strstr(entry, "<rpm:entry name=\"");
 					if (!entry || (req_end && entry >= req_end)) break;
 					entry += 17;
-					char dep_name[256];
-					sscanf(entry, "%255[^\"]", dep_name);
-					if (strncmp(dep_name, "rpmlib(", 7) != 0 && strncmp(dep_name, "config(", 7) != 0 && dep_name[0] != '/') {
-						if (depends[0]) strncat(depends, " ", sizeof(depends) - strlen(depends) - 1);
-						strncat(depends, dep_name, sizeof(depends) - strlen(depends) - 1);
+					
+					memset(dep_name, 0, sizeof(dep_name));
+
+					if (sscanf(entry, "%255[^\"]", dep_name) == 1) {
+						int valid = 1;
+						int d;
+						if (dep_name[0] == '\0') valid = 0;
+						for (d = 0; dep_name[d]; d++) {
+							/* Reject spaces and non-printable ASCII to prevent strtok ghosting */
+							if (dep_name[d] == ' ' || !((unsigned char)dep_name[d] >= 0x20 && (unsigned char)dep_name[d] <= 0x7E)) { 
+								valid = 0; 
+								break; 
+							}
+						}
+						
+						if (valid && strncmp(dep_name, "rpmlib(", 7) != 0 && strncmp(dep_name, "config(", 7) != 0 && dep_name[0] != '/') {
+							if (strchr(dep_name, '(') == NULL && strstr(dep_name, ".so") == NULL) {
+								if (depends[0]) strncat(depends, " ", sizeof(depends) - strlen(depends) - 1);
+								strncat(depends, dep_name, sizeof(depends) - strlen(depends) - 1);
+							}
+						}
 					}
 				}
 			}
 
-			pkg_t pkg;
 			memset(&pkg, 0, sizeof(pkg));
 			pkg.name = name;
 			pkg.epoch = epoch[0] ? epoch : (char *)"0";
@@ -515,6 +552,7 @@ static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path, pkg
 			pkg.summary = summary;
 			pkg.license = license;
 			pkg.url = url;
+			pkg.location = location;
 			pkg.description = trim(description);
 			pkg.depends = depends;
 			pkg.repo_id = ctx->repos[ctx->current_repo_idx].id;
@@ -522,9 +560,12 @@ static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path, pkg
 			if (cb) cb(ctx, &pkg, user_data);
 
 			free(pkg_buf);
+			search_ptr = pkg_end;
+		}
 
-			int consumed = pkg_end - buf;
-			memmove(buf, pkg_end, buf_len - consumed);
+		consumed = search_ptr - buf;
+		if (consumed > 0) {
+			memmove(buf, search_ptr, buf_len - consumed);
 			buf_len -= consumed;
 			buf[buf_len] = '\0';
 		}
@@ -590,6 +631,7 @@ static void query_cb(dnf_context_t *ctx, pkg_t *pkg, void *user_data)
 			free(match->summary); match->summary = xstrdup(pkg->summary);
 			free(match->license); match->license = xstrdup(pkg->license);
 			free(match->url); match->url = xstrdup(pkg->url);
+			free(match->location); match->location = xstrdup(pkg->location);
 			free(match->description); match->description = xstrdup(pkg->description);
 			free(match->depends); match->depends = xstrdup(pkg->depends);
 			free(match->repo_id); match->repo_id = xstrdup(pkg->repo_id);
@@ -631,8 +673,8 @@ static void perform_queries(dnf_context_t *ctx)
 		
 		free(best_match.name); free(best_match.epoch); free(best_match.version);
 		free(best_match.release); free(best_match.arch); free(best_match.summary);
-		free(best_match.license); free(best_match.url); free(best_match.description);
-		free(best_match.depends); free(best_match.repo_id);
+		free(best_match.license); free(best_match.url); free(best_match.location); 
+		free(best_match.description); free(best_match.depends); free(best_match.repo_id);
 	}
 }
 
@@ -827,24 +869,15 @@ static void perform_update(dnf_context_t *ctx)
 	printf("Complete!\n");
 }
 
-static void clone_cache_file(const char *src_path, const char *dst_path)
+static void sync_cache_file(const char *src_path, const char *dst_path)
 {
-	FILE *src = fopen(src_path, "rb");
-	FILE *dst = fopen(dst_path, "wb");
-	char buffer[8192];
-	int bytes;
-
-	if (!src || !dst) {
-		if (src) fclose(src);
-		if (dst) fclose(dst);
-		return;
+	int src_fd = open(src_path, O_RDONLY);
+	int dst_fd = open(dst_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (src_fd >= 0 && dst_fd >= 0) {
+		bb_copyfd_eof(src_fd, dst_fd);
 	}
-
-	while ((bytes = fread(buffer, 1, sizeof(buffer), src)) > 0) {
-		fwrite(buffer, 1, bytes, dst);
-	}
-	fclose(src);
-	fclose(dst);
+	if (src_fd >= 0) close(src_fd);
+	if (dst_fd >= 0) close(dst_fd);
 }
 
 static int run_dnf_update_cycle(dnf_context_t *ctx, int repo_idx)
@@ -922,8 +955,9 @@ static int run_dnf_update_cycle(dnf_context_t *ctx, int repo_idx)
 					char line[URL_MAX_LEN];
 					ctx->candidate_count = 0;
 					while (fgets(line, sizeof(line), fp) && ctx->candidate_count < MAX_CANDIDATE_MIRRORS) {
+						char *p;
 						if (line[0] == '#' || line[0] == '\n') continue;
-						char *p = strpbrk(line, "\r\n");
+						p = strpbrk(line, "\r\n");
 						if (p) *p = '\0';
 						safe_strncpy(ctx->candidates[ctx->candidate_count].url, line, URL_MAX_LEN);
 						ctx->candidates[ctx->candidate_count].priority = ctx->candidate_count + 1;
@@ -957,9 +991,12 @@ static int run_dnf_update_cycle(dnf_context_t *ctx, int repo_idx)
 		case STATE_FETCH_REPOMD:
 		{
 			char *url = xasprintf("%s/repodata/repomd.xml", ctx->target_mirror_url);
+			char *wget_cmd;
+			int rc;
+
 			if (ctx->verbose) printf("STATE: FETCH_REPOMD ... ");
-			char *wget_cmd = xasprintf("wget -q -O %s \"%s\"", repomd_file, url);
-			int rc = system(wget_cmd);
+			wget_cmd = xasprintf("wget -q -O %s \"%s\"", repomd_file, url);
+			rc = system(wget_cmd);
 			free(wget_cmd);
 			free(url);
 
@@ -1001,7 +1038,7 @@ static int run_dnf_update_cycle(dnf_context_t *ctx, int repo_idx)
 				if (access(ctx->primary_xml_hash_path, R_OK) == 0) {
 					if (ctx->verbose) printf("[DEBUG] Metadata already fresh (hash match: %s)\n", ctx->primary_xml_hash_path);
 					unlink(primary_link);
-					clone_cache_file(ctx->primary_xml_hash_path, primary_link);
+					sync_cache_file(ctx->primary_xml_hash_path, primary_link);
 					state = STATE_PARSE_PRIMARY;
 				} else {
 					state = STATE_FETCH_PRIMARY;
@@ -1024,7 +1061,7 @@ static int run_dnf_update_cycle(dnf_context_t *ctx, int repo_idx)
 				if (rc == 0 || access(ctx->primary_xml_hash_path, R_OK) == 0) {
 					if (ctx->verbose) printf("PASS\n");
 					unlink(primary_link);
-					clone_cache_file(ctx->primary_xml_hash_path, primary_link);
+					sync_cache_file(ctx->primary_xml_hash_path, primary_link);
 					state = STATE_PARSE_PRIMARY;
 				} else {
 					if (ctx->verbose) printf("FAIL\n");
@@ -1070,9 +1107,11 @@ static int sync_repos(dnf_context_t *ctx, int force)
 
 	for (i = 0; i < ctx->repo_count; i++) {
 		if (ctx->repos[i].enabled && (ctx->repos[i].metalink || ctx->repos[i].baseurl || ctx->repos[i].mirrorlist)) {
-			total_enabled++;
-			char *repomd_file = xasprintf("/var/cache/dnf/%s_repomd.xml", ctx->repos[i].id);
+			char *repomd_file;
 			struct stat st;
+
+			total_enabled++;
+			repomd_file = xasprintf("/var/cache/dnf/%s_repomd.xml", ctx->repos[i].id);
 			if (force || stat(repomd_file, &st) != 0 || (time(NULL) - st.st_mtime) > 3600 * 24) {
 				needed++;
 			}
@@ -1087,10 +1126,13 @@ static int sync_repos(dnf_context_t *ctx, int force)
 
 	for (i = 0; i < ctx->repo_count; i++) {
 		if (ctx->repos[i].enabled && (ctx->repos[i].metalink || ctx->repos[i].baseurl || ctx->repos[i].mirrorlist)) {
-			current++;
-			char *repomd_file = xasprintf("/var/cache/dnf/%s_repomd.xml", ctx->repos[i].id);
+			char *repomd_file;
 			struct stat st;
-			int is_fresh = (stat(repomd_file, &st) == 0 && (time(NULL) - st.st_mtime) < 3600 * 24);
+			int is_fresh;
+
+			current++;
+			repomd_file = xasprintf("/var/cache/dnf/%s_repomd.xml", ctx->repos[i].id);
+			is_fresh = (stat(repomd_file, &st) == 0 && (time(NULL) - st.st_mtime) < 3600 * 24);
 
 			if (!ctx->verbose) {
 				printf(" (%d/%d): %-40s", current, total_enabled, ctx->repos[i].id);
@@ -1102,19 +1144,22 @@ static int sync_repos(dnf_context_t *ctx, int force)
 				if (run_dnf_update_cycle(ctx, i))
 					synced++;
 			} else {
-				/* Guaranteed cache link reconstruction pass for skipped fresh repositories */
 				char *primary_link = xasprintf("/var/cache/dnf/%s_primary.raw", ctx->repos[i].id);
 				if (access(primary_link, R_OK) != 0) {
+					char *mirror_cache;
+					FILE *m_fp;
+
 					ctx->current_repo_idx = i;
 					ctx->target_mirror_url[0] = '\0';
 					
-					/* Fallback mirror caching initialization steps */
-					char *mirror_cache = xasprintf("/var/cache/dnf/%s_mirror.txt", ctx->repos[i].id);
-					FILE *m_fp = fopen(mirror_cache, "r");
+					mirror_cache = xasprintf("/var/cache/dnf/%s_mirror.txt", ctx->repos[i].id);
+					m_fp = fopen(mirror_cache, "r");
 					if (m_fp) {
-						if (fgets(ctx->target_mirror_url, URL_MAX_LEN, m_fp)) {
-							char *p = strpbrk(ctx->target_mirror_url, "\r\n");
+						char line[URL_MAX_LEN];
+						if (fgets(line, sizeof(line), m_fp)) {
+							char *p = strpbrk(line, "\r\n");
 							if (p) *p = '\0';
+							safe_strncpy(ctx->target_mirror_url, line, URL_MAX_LEN);
 						}
 						fclose(m_fp);
 					}
@@ -1126,7 +1171,7 @@ static int sync_repos(dnf_context_t *ctx, int force)
 					
 					parse_repomd_stream(ctx, repomd_file);
 					if (ctx->primary_xml_hash_path[0] && access(ctx->primary_xml_hash_path, R_OK) == 0) {
-						clone_cache_file(ctx->primary_xml_hash_path, primary_link);
+						sync_cache_file(ctx->primary_xml_hash_path, primary_link);
 					}
 				}
 				free(primary_link);
@@ -1200,9 +1245,7 @@ static void resolve_dependencies(dnf_context_t *ctx, const char *pkg_name, dep_l
 		char *deps = xstrdup(best_match.depends);
 		char *p = strtok(deps, " ");
 		while (p) {
-			if (strncmp(p, "rpmlib(", 7) != 0 && strncmp(p, "config(", 7) != 0 && p[0] != '/') {
-				resolve_dependencies(ctx, p, list);
-			}
+			resolve_dependencies(ctx, p, list);
 			p = strtok(NULL, " ");
 		}
 		free(deps);
@@ -1210,14 +1253,15 @@ static void resolve_dependencies(dnf_context_t *ctx, const char *pkg_name, dep_l
 	
 	free(best_match.name); free(best_match.epoch); free(best_match.version);
 	free(best_match.release); free(best_match.arch); free(best_match.summary);
-	free(best_match.license); free(best_match.url); free(best_match.description);
-	free(best_match.depends); free(best_match.repo_id);
+	free(best_match.license); free(best_match.url); free(best_match.location);
+	free(best_match.description); free(best_match.depends); free(best_match.repo_id);
 }
 
 static void perform_rescue_install(dnf_context_t *ctx, char **packages, int num_packages, int use_rescue)
 {
 	dep_list_t list = { NULL, 0 };
 	int i;
+	char *batch_rpms = xstrdup("");
 
 	printf("Resolving dependencies...\n");
 	for (i = 0; i < num_packages; i++) {
@@ -1226,6 +1270,7 @@ static void perform_rescue_install(dnf_context_t *ctx, char **packages, int num_
 	
 	if (list.count == 0) {
 		printf("Nothing to do.\n");
+		free(batch_rpms);
 		return;
 	}
 	
@@ -1237,7 +1282,7 @@ static void perform_rescue_install(dnf_context_t *ctx, char **packages, int num_
 	for (i = 0; i < list.count; i++) {
 		pkg_t best_match;
 		get_package_info(ctx, list.pkgs[i], &best_match);
-		if (best_match.name && best_match.url) {
+		if (best_match.name && best_match.location) {
 			char *mirror = NULL;
 			int j;
 			for (j = 0; j < ctx->repo_count; j++) {
@@ -1262,9 +1307,10 @@ static void perform_rescue_install(dnf_context_t *ctx, char **packages, int num_
 			}
 			
 			if (mirror) {
-				char *rpm_url = xasprintf("%s/%s", mirror, best_match.url);
+				char *rpm_url = xasprintf("%s/%s", mirror, best_match.location);
 				char *rpm_file = xasprintf("/var/cache/dnf/%s.rpm", best_match.name);
 				char *cmd;
+				
 				printf("Downloading %s...\n", best_match.name);
 				cmd = xasprintf("wget -q -O %s \"%s\"", rpm_file, rpm_url);
 				system(cmd);
@@ -1273,12 +1319,13 @@ static void perform_rescue_install(dnf_context_t *ctx, char **packages, int num_
 				if (use_rescue) {
 					printf("Extracting %s (rescue install)...\n", best_match.name);
 					cmd = xasprintf("rpm2cpio %s | cpio -idmuv --quiet", rpm_file);
+					system(cmd);
+					free(cmd);
 				} else {
-					printf("Installing %s...\n", best_match.name);
-					cmd = xasprintf("rpm -Uvh %s", rpm_file);
+					char *tmp = xasprintf("%s %s", batch_rpms, rpm_file);
+					free(batch_rpms);
+					batch_rpms = tmp;
 				}
-				system(cmd);
-				free(cmd);
 				
 				free(rpm_url);
 				free(rpm_file);
@@ -1287,11 +1334,20 @@ static void perform_rescue_install(dnf_context_t *ctx, char **packages, int num_
 			
 			free(best_match.name); free(best_match.epoch); free(best_match.version);
 			free(best_match.release); free(best_match.arch); free(best_match.summary);
-			free(best_match.license); free(best_match.url); free(best_match.description);
-			free(best_match.depends); free(best_match.repo_id);
+			free(best_match.license); free(best_match.url); free(best_match.location);
+			free(best_match.description); free(best_match.depends); free(best_match.repo_id);
 		}
 	}
+
+	if (!use_rescue && batch_rpms[0] != '\0') {
+		char *cmd;
+		printf("Installing packages in a single transaction...\n");
+		cmd = xasprintf("rpm -Uvh --nodeps --force %s", batch_rpms);
+		system(cmd);
+		free(cmd);
+	}
 	
+	free(batch_rpms);
 	for (i = 0; i < list.count; i++) free(list.pkgs[i]);
 	free(list.pkgs);
 }

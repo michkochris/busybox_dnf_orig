@@ -97,7 +97,7 @@ cd busybox-1.37.0
 ```
   1. Clone this repository into the root of your BusyBox source tree:
 ```bash
-it clone https://github.com/michkochris/busybox_dnf_orig busybox_dnf/
+git clone https://github.com/michkochris/busybox_dnf_orig busybox_dnf/
 ```
   2. Automated Build:
      The included script will integrate the applet, configure, and compile:
