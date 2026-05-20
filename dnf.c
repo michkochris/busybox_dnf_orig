@@ -776,37 +776,65 @@ static void query_cb(dnf_context_t *ctx, pkg_t *pkg, void *user_data)
 		return;
 	}
 
-	if (ctx->info_target && strcmp(pkg->name, ctx->info_target) == 0) {
-		int replace = 0;
-		if (!match->name) {
-			replace = 1;
-		} else {
-			char *full_ver = xasprintf("%s:%s-%s", pkg->epoch, pkg->version, pkg->release);
-			char *best_ver = xasprintf("%s:%s-%s", match->epoch, match->version, match->release);
-			int cmp = compare_versions(full_ver, best_ver);
-			if (cmp > 0) {
-				replace = 1;
-			} else if (cmp == 0) {
-				/* If versions are equal, prefer the one matching our basearch */
-				if (strcmp(pkg->arch, ctx->basearch) == 0 && strcmp(match->arch, ctx->basearch) != 0)
-					replace = 1;
+	if (ctx->info_target) {
+		int match_found = 0;
+		if (strcmp(pkg->name, ctx->info_target) == 0) {
+			match_found = 1;
+		} else if (pkg->provides) {
+			char *prov_copy = xstrdup(pkg->provides);
+			char *saveptr;
+			char *p = strtok_r(prov_copy, " ", &saveptr);
+			while (p) {
+				if (strcmp(ctx->info_target, p) == 0) {
+					match_found = 1;
+					break;
+				}
+				char *paren = strchr(p, '(');
+				if (paren) {
+					*paren = '\0';
+					if (strcmp(ctx->info_target, p) == 0) {
+						match_found = 1;
+						break;
+					}
+					*paren = '(';
+				}
+				p = strtok_r(NULL, " ", &saveptr);
 			}
-			free(full_ver); free(best_ver);
+			free(prov_copy);
 		}
 
-		if (replace) {
-			free(match->name); match->name = xstrdup(pkg->name);
-			free(match->epoch); match->epoch = xstrdup(pkg->epoch);
-			free(match->version); match->version = xstrdup(pkg->version);
-			free(match->release); match->release = xstrdup(pkg->release);
-			free(match->arch); match->arch = xstrdup(pkg->arch);
-			free(match->summary); match->summary = xstrdup(pkg->summary);
-			free(match->license); match->license = xstrdup(pkg->license);
-			free(match->url); match->url = xstrdup(pkg->url);
-			free(match->location); match->location = xstrdup(pkg->location);
-			free(match->description); match->description = xstrdup(pkg->description);
-			free(match->depends); match->depends = xstrdup(pkg->depends);
-			free(match->repo_id); match->repo_id = xstrdup(pkg->repo_id);
+		if (match_found) {
+			int replace = 0;
+			if (!match->name) {
+				replace = 1;
+			} else {
+				char *full_ver = xasprintf("%s:%s-%s", pkg->epoch, pkg->version, pkg->release);
+				char *best_ver = xasprintf("%s:%s-%s", match->epoch, match->version, match->release);
+				int cmp = compare_versions(full_ver, best_ver);
+				if (cmp > 0) {
+					replace = 1;
+				} else if (cmp == 0) {
+					/* If versions are equal, prefer the one matching our basearch */
+					if (strcmp(pkg->arch, ctx->basearch) == 0 && strcmp(match->arch, ctx->basearch) != 0)
+						replace = 1;
+				}
+				free(full_ver); free(best_ver);
+			}
+
+			if (replace) {
+				free(match->name); match->name = xstrdup(pkg->name);
+				free(match->epoch); match->epoch = xstrdup(pkg->epoch);
+				free(match->version); match->version = xstrdup(pkg->version);
+				free(match->release); match->release = xstrdup(pkg->release);
+				free(match->arch); match->arch = xstrdup(pkg->arch);
+				free(match->summary); match->summary = xstrdup(pkg->summary);
+				free(match->license); match->license = xstrdup(pkg->license);
+				free(match->url); match->url = xstrdup(pkg->url);
+				free(match->location); match->location = xstrdup(pkg->location);
+				free(match->description); match->description = xstrdup(pkg->description);
+				free(match->depends); match->depends = xstrdup(pkg->depends);
+				free(match->repo_id); match->repo_id = xstrdup(pkg->repo_id);
+			}
 		}
 	}
 }
@@ -920,7 +948,10 @@ static void load_installed_packages(void)
 	}
 }
 
-static int is_package_installed(const char *name)
+static void free_pkg_contents(pkg_t *pkg);
+static void get_package_info(dnf_context_t *ctx, const char *name, pkg_t *best_match);
+
+static int is_package_installed(dnf_context_t *ctx, const char *name)
 {
 	pkg_t key;
 	pkg_t *inst;
@@ -934,7 +965,21 @@ static int is_package_installed(const char *name)
 	inst = bsearch(&key, installed_packages, num_installed, sizeof(pkg_t), cmp_pkg_name);
 	if (inst) return 1;
 
-	/* If not found by name, it might be a capability (Provides) installed on the system */
+	/* If not found by name, it might be a capability.
+	 * Use repo metadata to resolve it to a package name, then check if that's installed.
+	 */
+	if (ctx) {
+		pkg_t best_match;
+		memset(&best_match, 0, sizeof(best_match));
+		get_package_info(ctx, name, &best_match);
+		if (best_match.name) {
+			int found = is_package_installed(NULL, best_match.name);
+			free_pkg_contents(&best_match);
+			if (found) return 1;
+		}
+	}
+
+	/* Last resort: ask RPM directly */
 	{
 		char *cmd = xasprintf("rpm -q --whatprovides '%s' >/dev/null 2>&1", name);
 		int rc = system(cmd);
@@ -945,7 +990,7 @@ static int is_package_installed(const char *name)
 	return 0;
 }
 
-static int check_deps_sanity(dnf_context_t *ctx UNUSED_PARAM, pkg_t *p)
+static int check_deps_sanity(dnf_context_t *ctx, pkg_t *p)
 {
 	int failed_count = 0;
 	char *deps_copy, *dep_entry;
@@ -956,7 +1001,7 @@ static int check_deps_sanity(dnf_context_t *ctx UNUSED_PARAM, pkg_t *p)
 	dep_entry = strtok(deps_copy, " ");
 
 	while (dep_entry) {
-		if (!is_package_installed(dep_entry)) {
+		if (!is_package_installed(ctx, dep_entry)) {
 			if (failed_count == 0) printf("\n");
 			printf("    %s[ERROR]%s Missing dependency: %s\n", CLR_RED, CLR_RESET, dep_entry);
 			failed_count++;
@@ -1611,13 +1656,11 @@ static void resolve_cb(dnf_context_t *ctx, pkg_t *pkg, void *user_data)
 
 			if (replace) {
 				char *saved_name = match->name;
-				// If the match was by capability/file, but we found a package,
-				// update the name to the actual package name for clearer logging
-				if (saved_name[0] == '/' || strstr(saved_name, ".so")) {
+				// If the match was by capability/file/virtual-provide, but we found a package,
+				// update the name to the actual package name for clearer logging (smart inquiry)
+				if (strcmp(saved_name, pkg->name) != 0) {
 					free(saved_name);
 					match->name = xstrdup(pkg->name);
-				} else {
-					match->name = saved_name;
 				}
 
 				free(match->epoch); match->epoch = xstrdup(pkg->epoch);
@@ -1637,7 +1680,7 @@ static void resolve_cb(dnf_context_t *ctx, pkg_t *pkg, void *user_data)
 					char *saveptr_dep;
 					char *p_dep = strtok_r(deps, " ", &saveptr_dep);
 					while (p_dep) {
-						if (!is_package_installed(p_dep)) {
+						if (!is_package_installed(ctx, p_dep)) {
 							int old_count = list->count;
 							add_to_dep_list(list, p_dep);
 							if (list->count > old_count) {
@@ -1720,7 +1763,7 @@ static void perform_rescue_install(dnf_context_t *ctx, char **packages, int num_
 	char *batch_rpms = xstrdup("");
 
 	for (i = 0; i < num_packages; i++) {
-		if (mode == MODE_INSTALL && is_package_installed(packages[i])) {
+		if (mode == MODE_INSTALL && is_package_installed(ctx, packages[i])) {
 			// Don't print "already installed" here if it's part of a large batch
 			if (num_packages < 5) printf("Package %s is already installed.\n", packages[i]);
 			continue;
@@ -2167,7 +2210,7 @@ int dnf_main(int argc UNUSED_PARAM, char **argv)
 
 		for (i = 1; argv[i]; i++) {
 			pkg_t best_match;
-			int installed = is_package_installed(argv[i]);
+			int installed = is_package_installed(&ctx, argv[i]);
 			int total_failed = 0;
 
 			printf("%sVerifying package:%s %s\n", CLR_BOLD, CLR_RESET, argv[i]);
@@ -2178,6 +2221,9 @@ int dnf_main(int argc UNUSED_PARAM, char **argv)
 
 			get_package_info(&ctx, argv[i], &best_match);
 			if (best_match.name) {
+				if (strcmp(best_match.name, argv[i]) != 0) {
+					printf("  [INFO] Resolved to: %s\n", best_match.name);
+				}
 				printf("  [INFO] Version: %s-%s\n", best_match.version, best_match.release);
 				if (installed) {
 					int d_failed, f_failed;
@@ -2191,7 +2237,7 @@ int dnf_main(int argc UNUSED_PARAM, char **argv)
 
 					printf("  [CHECK] Filesystem... ");
 					fflush(stdout);
-					f_failed = check_files_sanity(argv[i]);
+					f_failed = check_files_sanity(best_match.name);
 					if (f_failed == 0) printf("%sOK%s\n", CLR_GREEN, CLR_RESET);
 					else {
 						printf("%sFAILED (%d issues)%s\n", CLR_RED, f_failed, CLR_RESET);
@@ -2221,23 +2267,48 @@ int dnf_main(int argc UNUSED_PARAM, char **argv)
 		if (!argv[1]) bb_show_usage();
 
 		for (i = 1; argv[i]; i++) {
-			/* Use FILEDIGESTS (modern) and pipe delimiter for robust parsing */
-			char *cmd = xasprintf("rpm -q --qf '[%%{FILENAMES}|%%{FILEDIGESTS}\\n]' %s 2>/dev/null", argv[i]);
-			FILE *f = popen(cmd, "r");
+			char *target = xstrdup(argv[i]);
+			char *cmd;
+			FILE *f;
 			char *line;
 			int checked = 0, failed = 0;
 
+			/* Check if target is a package name, if not try to resolve it to a package name */
+			char *check_pkg = xasprintf("rpm -q %s >/dev/null 2>&1", target);
+			if (system(check_pkg) != 0) {
+				char *resolve_cmd = xasprintf("rpm -q --whatprovides '%s' --qf '%%{NAME}\\n' 2>/dev/null | head -n1", target);
+				FILE *rf = popen(resolve_cmd, "r");
+				if (rf) {
+					char *resolved = xmalloc_fgetline(rf);
+					if (resolved && resolved[0]) {
+						free(target);
+						target = resolved;
+					} else {
+						free(resolved);
+					}
+					pclose(rf);
+				}
+				free(resolve_cmd);
+			}
+			free(check_pkg);
+
+			/* Use FILEDIGESTS (modern) and pipe delimiter for robust parsing */
+			cmd = xasprintf("rpm -q --qf '[%%{FILENAMES}|%%{FILEDIGESTS}\\n]' %s 2>/dev/null", target);
+			f = popen(cmd, "r");
+
 			if (!f) {
-				bb_error_msg("no integrity data for %s", argv[i]);
+				bb_error_msg("no integrity data for %s", target);
 				free(cmd);
+				free(target);
 				continue;
 			}
 
-			printf("Verifying %s...\n", argv[i]);
+			printf("Verifying %s...\n", target);
 
 			while ((line = xmalloc_fgetline(f)) != NULL) {
-				char *fname = strtok(line, "|");
-				char *hash = strtok(NULL, "|");
+				char *saveptr;
+				char *fname = strtok_r(line, "|", &saveptr);
+				char *hash = strtok_r(NULL, "|", &saveptr);
 
 				if (fname && hash && hash[0] != '(' && hash[0] != '\0') {
 					const char *tool = "md5sum";
@@ -2262,13 +2333,14 @@ int dnf_main(int argc UNUSED_PARAM, char **argv)
 			free(cmd);
 
 			if (checked == 0) {
-				bb_error_msg("no files found for %s or package not installed", argv[i]);
+				bb_error_msg("no files found for %s or package not installed", target);
 			} else {
 				if (failed == 0)
 					printf("%sVerification successful:%s all %d files match hashes.\n", CLR_GREEN, CLR_RESET, checked);
 				else
 					printf("%sVerification failed:%s %d of %d files are corrupted.\n", CLR_RED, CLR_RESET, failed, checked);
 			}
+			free(target);
 		}
 	} else {
 		bb_error_msg_and_die("command '%s' not yet implemented", command);

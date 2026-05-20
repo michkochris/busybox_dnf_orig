@@ -63,9 +63,9 @@ Commands:
 # Verify system sanity
 ./busybox dnf verify glibc
 
-# Install or reinstall via capability (shared library or file path)
-./busybox dnf reinstall "libmagic.so.1"
-./busybox dnf install "/etc/gai.conf"
+# perform smart inquiry via: (capabilities)
+# ./busybox dnf reinstall "libmagic.so.1"
+./busybox dnf verify "libmagic.so.1"
 ```
 
 ---
