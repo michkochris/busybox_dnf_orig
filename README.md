@@ -1,125 +1,107 @@
 # busybox_dnf
 
-> [!IMPORTANT]
-> **This project is currently under active development.** 
-> Expect frequent breaking changes and incomplete documentation.
+A high-performance, lightweight package management frontend for BusyBox.
 
-What is busybox_dnf:
+`busybox_dnf` provides a minimalist yet powerful interface to `rpm`, handling repository management, metadata parsing, and complex dependency resolution. It is designed specifically for embedded systems, rescue environments, and resource-constrained Fedora/RHEL-based distributions.
 
-  `busybox_dnf` is a high-level package management frontend for RPM-based
-  systems. It is a lightweight interface to `rpm` which handles repository
-  management and dependency resolution. It provides minimalist replacements
-  for the features found in DNF (Dandified YUM).
+---
 
-  Built with size-optimization and system recovery in mind, `busybox_dnf`
-  integrates directly into the BusyBox Kbuild system and utilizes internal
-  applets for critical operations. This makes it a robust choice for embedded
-  systems, rescue disks, and minimalist Fedora/RHEL-based environments where
-  a full `dnf` installation is too heavy or when the system manager is broken.
+## Key Features
 
-----------------
+*   **Greedy Dependency Resolution**: A high-performance resolver that uses batch-processing to resolve complex, nested dependency trees (tested up to 700+ packages) in seconds.
+*   **Full Group Support**: Implements `groupinstall` by parsing repository `comps.xml` files, allowing for the installation of entire environments like "Xfce" or "base-x" with a single command.
+*   **Advanced Capability Matching**: Robust support for virtual packages and capabilities. It intelligently matches against `Provides:`, architecture-specific symbols, and standard system paths (e.g., `/usr/bin/sh`).
+*   **Atomic Transactions**: Large batches of packages are downloaded, staged, and passed to `rpm` in a single transaction for maximum consistency and speed.
+*   **Embedded Optimized (Auto-Cleanup)**: Automatically purges downloaded RPM files immediately after installation, ensuring the system storage footprint remains lean.
+*   **System Rescue Toolkit**: Specialized commands for recovery:
+    *   `verify`: Check package sanity, existing files, working symlinks and check dependencies.
+    *   `reinstall`: Restore package files through standard RPM paths.
+    *   `md5check`: Verify package integrity by checking every installed file against its recorded checksum (MD5/SHA).
+    *   `rescue-install`: Failsafe extraction using BusyBox internal `cpio` logic, bypassing the RPM database to repair core system libraries.
+*   **Smart Metadata Caching**: Efficient state machine for fetching and caching repository metadata (`metalink`, `repomd.xml`, `primary.xml`, `comps.xml`) with a 6-hour refresh cycle.
 
-Features:
+---
 
-  * Professional UI: Familiar output format with repository sync status and
-    real-time progress tracking via a terminal-aware progress bar.
-  * Dependency Resolution: Automatically resolves recursive dependencies for
-    RPM packages, including support for Virtual Packages (via `Provides:`).
-  * System Rescue Toolkit: Specialized commands like `reinstall`, `verify`,
-    and `rescue-install` for repairing corrupted systems.
-  * Disk Usage Reporting: Accurate calculation of disk space used or freed
-    after operations, tracking individual package installed-sizes.
-  * Manual Extraction: `rescue-install` bypasses broken `rpm` instances by
-    using internal `cpio` and `rpm2cpio` logic to extract payloads directly to `/`.
-  * RPM-Style Versioning: Robust comparison logic supporting epochs,
-    revisions, and RPM-specific sorting rules.
-  * Lightweight Defaults: Optimized for resource-constrained environments,
-    focusing on core dependencies.
+## Usage
 
-----------------
-Repository Configuration:
-
-  `busybox_dnf` requires valid repository configuration files to function. It
-  looks for `.repo` files in `/etc/yum.repos.d/`. 
-
-  * **Environment Support**: If you are running `busybox_dnf` on a non-RPM
-    distribution, you **must** manually create
-    `/etc/yum.repos.d/` and provide at least one valid repository file.
-  * **Repository Files**: Each `.repo` file should follow the standard YUM/DNF
-    format (with `[id]`, `baseurl=` or `metalink=`, and `enabled=1`).
-  * **Architecture**: The applet automatically detects your system architecture
-    and version, but these can be overridden via environment variables if
-    needed for cross-environment recovery.
-
-----------------
-Using busybox_dnf:
 ```text
-  Usage: dnf [-y] COMMAND [PACKAGE...]
+Usage: dnf [-yv] COMMAND [PACKAGE...]
 
-  High-level package management frontend
+High-level package management frontend
 
-  Options:
-      -y, --assumeyes     Answer yes for all questions
+Options:
+    -y, --assumeyes     Answer yes for all questions
+    -v, --verbose       Verbose output for debugging
 
-  Commands:
-      check-update        Check for available package updates
-      update              Update the system
-      install             Install new packages
-      remove              Remove packages
-      reinstall           Reinstall packages (restores files)
-      rescue-install      Install packages bypassing rpm (uses internal cpio to /)
-      verify              Verify package sanity (check status, deps, and files)
-      search              Search for a package (alphabetically sorted)
-      info                Display details about a package
+Commands:
+    update              Update repository metadata cache
+    upgrade             Upgrade the system
+    check-update        Check for available package updates
+    install             Install new packages
+    remove              Remove packages
+    reinstall           Reinstall packages (restores files)
+    groupinstall        Install all packages in a group (e.g. "Xfce")
+    rescue-install      Install packages bypassing rpm (uses internal cpio to /)
+    verify              Verify package sanity (check status, deps, and files)
+    md5check            Verify package integrity (checks file hashes)
+    search              Search for a package
+    info                Display details about a package
 ```
-  Examples:
+
+### Examples
+
 ```bash
-./busybox dnf check-update
-./busybox dnf install vim
-./busybox dnf verify kernel
-./busybox dnf rescue-install glibc
+# Update metadata and upgrade all packages
+./busybox dnf upgrade
+
+# Install a full desktop environment
+./busybox dnf groupinstall "Xfce Desktop"
+
+# Search for a specific package
+./busybox dnf search network-manager
+
+# Verify system sanity
+./busybox dnf verify glibc
 ```
-----------------
 
-Rescue Workflow:
+---
 
-  `busybox_dnf` is designed for system recovery on RPM-based distributions.
-  When critical libraries or the package manager itself is corrupted:
+## Repository Configuration
 
-  1. Use `verify` to identify broken dependencies, missing files, or
-     incorrect permissions.
-  2. Use `reinstall` to restore files via standard `rpm` paths.
-  3. Use `rescue-install` as a failsafe to extract critical packages
-     directly to the root filesystem using BusyBox internal applets,
-     bypassing the RPM database if necessary.
+`busybox_dnf` utilizes standard `.repo` files located in `/etc/yum.repos.d/`.
 
-----------------
+*   **Format**: Supports standard `[id]`, `baseurl=`, `metalink=`, and `mirrorlist=` entries.
+*   **Variable Substitution**: Automatically handles `$releasever` and `$basearch` variables within repo files.
+*   **Detection**: Automatically detects host architecture (e.g., x86_64, aarch64) and distribution version.
 
-Build Instructions:
+---
 
-  To integrate `busybox_dnf` into your BusyBox build:
+## Build Instructions
 
-  0. Optionally wget busybox source and install dependencies
+### 1. Host Requirements (Fedora/RHEL)
 ```bash
-# Install host requirements (Fedora)
 chmod +x busybox_dnf/fedora-depends.sh
 ./busybox_dnf/fedora-depends.sh
+```
 
-# Get source
+# 2. Get source
 wget https://busybox.net/downloads/busybox-1.37.0.tar.bz2
 tar -xvjf busybox-1.37.0.tar.bz2
 cd busybox-1.37.0
-```
-  1. Clone this repository into the root of your BusyBox source tree:
+
+### 3. Integration
+Clone this repository into the root of your BusyBox source tree:
 ```bash
 git clone https://github.com/michkochris/busybox_dnf_orig busybox_dnf/
 ```
-  2. Automated Build:
-     The included script will integrate the applet, configure, and compile:
+
+### 4. Build
+Use the automated integration script:
 ```bash
 ./busybox_dnf/busybox_build.sh
 ```
-  3. Manual Integration:
+
+### 5. Manual Integration:
 ```bash
 patch -p0 < busybox_dnf/busybox_dnf.patch
 make menuconfig  # Enable 'dnf' under 'Applets' -> 'Busybox DNF'
@@ -127,14 +109,13 @@ make
 ```
 ----------------
 
-License:
+## License
 
-  This project is licensed under the GNU General Public License, version 2
-  (GPLv2), matching the license of the BusyBox project.
+This project is licensed under the **GNU General Public License, version 2 (GPLv2)**, matching the license of the BusyBox project.
 
 ----------------
 
-Contact:
+## Contact
 
-  For feedback, bug reports, or inquiries:
-  michkochris@gmail.com | runepkg@gmail.com
+For feedback, bug reports, or inquiries:
+michkochris@gmail.com | runepkg@gmail.com

@@ -1,0 +1,59 @@
+A More "BusyBox-Friendly" Approach: Topological Sort
+Rather than porting a complex library, you can implement a Topological Sort algorithm. This is the industry-standard "lightweight" way to resolve dependencies.
+
+The Logic:
+
+Build a Dependency Graph:
+
+Create a simple linked list or dynamic array of nodes.
+
+Each node is a package.
+
+Edges represent dependencies (Package A -> requires -> Package B).
+
+Topological Sort (Kahn's Algorithm):
+
+This algorithm naturally tells you the order in which packages must be installed so that dependencies are met first.
+
+Capability Resolution:
+
+When you encounter a "Capability" (e.g., libQt5Core.so.5), you perform a lookup in your metadata to find which package provides that capability.
+
+Replace the capability node in your graph with the provider package node.
+
+Continue the sort.
+
+Feasibility Verdict
+If you port libsolv: You will spend months fighting build systems (cmake), managing external library links, and shrinking the code to fit the BusyBox style. It will likely double the binary size of your dnf applet.
+
+If you write a simple DAG solver: You can implement a recursive topological sort in ~200-300 lines of C. It will be faster, smaller, and easier to debug because it will be entirely contained within your dnf.c file.
+
+Recommendation
+Don't port libsolv. Instead, implement a recursive dependency resolver with a simple hash-map for capability lookups.
+
+Structure for your resolver:
+
+C
+// Pseudo-code for your next step
+void resolve_deps(const char *pkg_name) {
+    if (is_visited(pkg_name)) return;
+    
+    // 1. Get pkg info (from your parsed XML)
+    pkg_t *p = lookup_package(pkg_name);
+    
+    // 2. For each dependency:
+    for (char *dep : p->depends) {
+        // Check if 'dep' is a package name
+        if (is_package(dep)) {
+            resolve_deps(dep);
+        } else {
+            // It's a capability! Find the provider.
+            char *provider = find_provider_for_capability(dep);
+            resolve_deps(provider);
+        }
+    }
+    
+    // 3. Add to "Install List" (this gives you the correct order)
+    add_to_install_queue(p);
+}
+This approach fits perfectly into the BusyBox ecosystem, requires zero external libraries, and will likely perform much better for your specific testing use case.

@@ -19,6 +19,7 @@
 //usage:     "\n\tremove\t\t\tRemove packages"
 //usage:     "\n\tupgrade\t\t\tUpgrade the system"
 //usage:     "\n\treinstall\t\tReinstall packages (restores files)"
+//usage:     "\n\tgroupinstall\t\tInstall all packages in a group"
 //usage:     "\n\trescue-install\t\tInstall packages bypassing rpm (uses internal tar/cpio to /)"
 //usage:     "\n\tverify\t\t\tVerify package sanity (check status, deps, and files)"
 //usage:     "\n\tmd5check\t\tVerify package integrity (checks file hashes)"
@@ -112,6 +113,8 @@ typedef struct {
 	char target_mirror_url[URL_MAX_LEN];
 	char primary_xml_url[URL_MAX_LEN];
 	char primary_xml_hash_path[URL_MAX_LEN];
+	char group_xml_url[URL_MAX_LEN];
+	char group_xml_hash_path[URL_MAX_LEN];
 	mirror_node_t candidates[MAX_CANDIDATE_MIRRORS];
 	int candidate_count;
 } dnf_context_t;
@@ -382,17 +385,26 @@ static void parse_repomd_stream(dnf_context_t *ctx, const char *cache_path)
 	FILE *fp = fopen_for_read(cache_path);
 	char line[1024];
 	int in_primary = 0;
+	int in_group = 0;
 
 	if (!fp) return;
 
 	while (fgets(line, sizeof(line), fp)) {
 		if (strstr(line, "<data type=\"primary\">")) {
 			in_primary = 1;
+			in_group = 0;
+		} else if (strstr(line, "<data type=\"group\">")) {
+			in_group = 1;
+			in_primary = 0;
 		}
-		if (in_primary) {
+
+		if (in_primary || in_group) {
 			char *loc = strstr(line, "<location href=\"");
 			if (loc) {
 				char *end;
+				char *target_url = in_primary ? ctx->primary_xml_url : ctx->group_xml_url;
+				char *target_hash = in_primary ? ctx->primary_xml_hash_path : ctx->group_xml_hash_path;
+
 				loc += 16;
 				end = strchr(loc, '\"');
 				if (end && (end - loc) < URL_MAX_LEN) {
@@ -406,24 +418,23 @@ static void parse_repomd_stream(dnf_context_t *ctx, const char *cache_path)
 					while (relative_url[0] == '/')
 						memmove(relative_url, relative_url + 1, strlen(relative_url));
 
-					snprintf(ctx->primary_xml_url, URL_MAX_LEN, "%.*s/%s", tlen, ctx->target_mirror_url, relative_url);
+					snprintf(target_url, URL_MAX_LEN, "%.*s/%s", tlen, ctx->target_mirror_url, relative_url);
 
 					bname = strrchr(relative_url, '/');
 					if (!bname) bname = relative_url; else bname++;
-					snprintf(ctx->primary_xml_hash_path, URL_MAX_LEN, "/var/cache/dnf/%s_%s", ctx->repos[ctx->current_repo_idx].id, bname);
+					snprintf(target_hash, URL_MAX_LEN, "/var/cache/dnf/%s_%s", ctx->repos[ctx->current_repo_idx].id, bname);
 
 					if (ctx->verbose) {
-						printf("[DEBUG] Found Primary XML: %s\n", ctx->primary_xml_url);
-						printf("[DEBUG] Hash-based Path: %s\n", ctx->primary_xml_hash_path);
+						printf("[DEBUG] Found %s XML: %s\n", in_primary ? "Primary" : "Group", target_url);
+						printf("[DEBUG] Hash-based Path: %s\n", target_hash);
 					}
 					free(relative_url);
-					in_primary = 0;
-					break;
 				}
 			}
 		}
 		if (strstr(line, "</data>")) {
 			in_primary = 0;
+			in_group = 0;
 		}
 	}
 	fclose(fp);
@@ -453,6 +464,8 @@ static void dnf_debug_context(dnf_context_t *ctx, dnf_state_t state)
 
 	if (ctx->primary_xml_url[0])
 		printf("  [Data]    Primary Metadata URL: %s\n", ctx->primary_xml_url);
+	if (ctx->group_xml_url[0])
+		printf("  [Data]    Group Metadata URL:   %s\n", ctx->group_xml_url);
 	printf("----------------------------------------\n");
 }
 
@@ -490,7 +503,7 @@ static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path, pkg
 	int buf_len = 0;
 
 	cmd = xasprintf("unzstd -c %s 2>/dev/null || zcat %s 2>/dev/null || xzcat %s 2>/dev/null || cat %s",
-						 cache_path, cache_path, cache_path, cache_path);
+					cache_path, cache_path, cache_path, cache_path);
 	fp = popen(cmd, "r");
 	free(cmd);
 
@@ -525,15 +538,14 @@ static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path, pkg
 			char url[256];
 			char location[512];
 			char description[2048];
-			char depends[2048];
+			// Increased buffer size for dependencies
+			char *depends = xzalloc(16384);
 			char *loc_ptr;
 			char *v_tag;
 			char *req_start;
 			pkg_t pkg;
 
-			if (!pkg_end) {
-				break;
-			}
+			if (!pkg_end) break;
 			pkg_end += 10;
 
 			pkg_block_len = pkg_end - pkg_start;
@@ -550,7 +562,6 @@ static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path, pkg
 			memset(url, 0, sizeof(url));
 			memset(location, 0, sizeof(location));
 			memset(description, 0, sizeof(description));
-			memset(depends, 0, sizeof(depends));
 
 			get_tag_value(pkg_buf, "name", name, sizeof(name));
 			get_tag_value(pkg_buf, "arch", arch, sizeof(arch));
@@ -587,34 +598,110 @@ static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path, pkg
 				char *entry = req_start;
 				while (entry && (!req_end || entry < req_end)) {
 					char dep_name[256];
-					
+
 					entry = strstr(entry, "<rpm:entry name=\"");
 					if (!entry || (req_end && entry >= req_end)) break;
 					entry += 17;
-					
+
 					memset(dep_name, 0, sizeof(dep_name));
 
 					if (sscanf(entry, "%255[^\"]", dep_name) == 1) {
 						int valid = 1;
 						int d;
 						int len = strlen(dep_name);
-						
+
 						if (len < 2 || len > 100) valid = 0;
-						
+
 						for (d = 0; dep_name[d]; d++) {
-							if (dep_name[d] == ' ' || !((unsigned char)dep_name[d] >= 0x20 && (unsigned char)dep_name[d] <= 0x7E)) { 
-								valid = 0; 
-								break; 
+							if (dep_name[d] == ' ' || !((unsigned char)dep_name[d] >= 0x20 && (unsigned char)dep_name[d] <= 0x7E)) {
+								valid = 0;
+								break;
 							}
 						}
-						
-						if (valid && strncmp(dep_name, "rpmlib(", 7) != 0 && strncmp(dep_name, "config(", 7) != 0 && dep_name[0] != '/') {
-							if (strchr(dep_name, '(') == NULL && strstr(dep_name, ".so") == NULL) {
-								if (depends[0]) strncat(depends, " ", sizeof(depends) - strlen(depends) - 1);
-								strncat(depends, dep_name, sizeof(depends) - strlen(depends) - 1);
+
+						// Enhanced filter: Exclude rpmlib and virtual config files
+						if (valid && strncmp(dep_name, "rpmlib(", 7) != 0 && strncmp(dep_name, "config(", 7) != 0) {
+							// Strip versioning and architecture from dependency name if present
+							// e.g. "pkgname >= 1.2.3" -> "pkgname"
+							// e.g. "pkgname(x86-64)" -> "pkgname"
+							char *clean_dep = xstrdup(dep_name);
+							char *p;
+
+							// If it starts with /, it's a file dependency, keep it as is
+							if (clean_dep[0] != '/') {
+								p = strpbrk(clean_dep, " (><=");
+								if (p) *p = '\0';
 							}
+
+							if (clean_dep[0]) {
+								if (strlen(depends) + strlen(clean_dep) + 2 < 16384) {
+									if (depends[0]) strcat(depends, " ");
+									strcat(depends, clean_dep);
+								}
+							}
+							free(clean_dep);
+						} else if (valid && strncmp(dep_name, "config(", 7) == 0) {
+							// For config(file), extract the file path
+							char *clean_dep = xstrdup(dep_name + 7);
+							char *p = strrchr(clean_dep, ')');
+							if (p) *p = '\0';
+
+							if (clean_dep[0]) {
+								if (strlen(depends) + strlen(clean_dep) + 2 < 16384) {
+									if (depends[0]) strcat(depends, " ");
+									strcat(depends, clean_dep);
+								}
+							}
+							free(clean_dep);
 						}
 					}
+				}
+			}
+
+			char *provides = xzalloc(16384);
+			char *prov_start = strstr(pkg_buf, "<rpm:provides>");
+			if (prov_start) {
+				char *prov_end = strstr(prov_start, "</rpm:provides>");
+				char *entry = prov_start;
+				while (entry && (!prov_end || entry < prov_end)) {
+					char prov_name[256];
+
+					entry = strstr(entry, "<rpm:entry name=\"");
+					if (!entry || (prov_end && entry >= prov_end)) break;
+					entry += 17;
+
+					memset(prov_name, 0, sizeof(prov_name));
+
+					if (sscanf(entry, "%255[^\"]", prov_name) == 1) {
+						if (strlen(provides) + strlen(prov_name) + 2 < 16384) {
+							if (provides[0]) strcat(provides, " ");
+							strcat(provides, prov_name);
+						}
+					}
+					/* Advance search pointer to avoid infinite loop on same entry */
+					entry = strchr(entry, '>');
+				}
+			}
+
+			/* Parse <file> tags which are also providers in RPM metadata */
+			char *file_ptr = pkg_buf;
+			while ((file_ptr = strstr(file_ptr, "<file>")) != NULL) {
+				char *file_end = strstr(file_ptr, "</file>");
+				if (file_end) {
+					file_ptr += 6;
+					int f_len = file_end - file_ptr;
+					if (f_len > 0 && f_len < 256) {
+						char fname[256];
+						memcpy(fname, file_ptr, f_len);
+						fname[f_len] = '\0';
+						if (strlen(provides) + f_len + 2 < 16384) {
+							if (provides[0]) strcat(provides, " ");
+							strcat(provides, fname);
+						}
+					}
+					file_ptr = file_end + 7;
+				} else {
+					break;
 				}
 			}
 
@@ -630,11 +717,14 @@ static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path, pkg
 			pkg.location = location;
 			pkg.description = trim(description);
 			pkg.depends = depends;
+			pkg.provides = provides;
 			pkg.repo_id = ctx->repos[ctx->current_repo_idx].id;
 
 			if (cb) cb(ctx, &pkg, user_data);
 
 			free(pkg_buf);
+			free(depends); // Free dynamic dependency buffer
+			free(provides);
 			search_ptr = pkg_end;
 		}
 
@@ -832,6 +922,8 @@ static int is_package_installed(const char *name)
 	pkg_t key;
 	pkg_t *inst;
 	
+	if (name[0] == '/' && access(name, F_OK) == 0) return 1;
+
 	if (!installed_packages) load_installed_packages();
 	if (num_installed == 0) return 0;
 	
@@ -1036,6 +1128,7 @@ static void perform_update(dnf_context_t *ctx)
 		}
 		
 		printf("Upgrading %d packages...\n", num_updates);
+		printf("Resolving dependencies...\n");
 		perform_rescue_install(ctx, pkgs, num_updates, MODE_UPGRADE);
 		
 		for (i = 0; i < num_updates; i++) {
@@ -1065,11 +1158,13 @@ static int run_dnf_update_cycle(dnf_context_t *ctx, int repo_idx)
 	char *cache_file = xasprintf("/var/cache/dnf/%s_metalink.xml", ctx->repos[repo_idx].id);
 	char *repomd_file = xasprintf("/var/cache/dnf/%s_repomd.xml", ctx->repos[repo_idx].id);
 	char *primary_link = xasprintf("/var/cache/dnf/%s_primary.raw", ctx->repos[repo_idx].id);
+	char *group_link = xasprintf("/var/cache/dnf/%s_group.raw", ctx->repos[repo_idx].id);
 	char *mirror_cache = xasprintf("/var/cache/dnf/%s_mirror.txt", ctx->repos[repo_idx].id);
 	int success = 0;
 
 	ctx->current_repo_idx = repo_idx;
 	ctx->primary_xml_url[0] = '\0';
+	ctx->group_xml_url[0] = '\0';
 	ctx->target_mirror_url[0] = '\0';
 
 	while (state != STATE_EXECUTE_PAYLOAD && state != STATE_ERROR) {
@@ -1215,13 +1310,16 @@ static int run_dnf_update_cycle(dnf_context_t *ctx, int repo_idx)
 			if (ctx->primary_xml_url[0] != '\0') {
 				if (ctx->verbose) printf("PASS\n");
 				if (access(ctx->primary_xml_hash_path, R_OK) == 0) {
-					if (ctx->verbose) printf("[DEBUG] Metadata already fresh (hash match: %s)\n", ctx->primary_xml_hash_path);
+					if (ctx->verbose) printf("[DEBUG] Primary metadata already fresh\n");
 					unlink(primary_link);
 					sync_cache_file(ctx->primary_xml_hash_path, primary_link);
-					state = STATE_PARSE_PRIMARY;
-				} else {
-					state = STATE_FETCH_PRIMARY;
 				}
+				if (ctx->group_xml_url[0] != '\0' && access(ctx->group_xml_hash_path, R_OK) == 0) {
+					if (ctx->verbose) printf("[DEBUG] Group metadata already fresh\n");
+					unlink(group_link);
+					sync_cache_file(ctx->group_xml_hash_path, group_link);
+				}
+				state = STATE_FETCH_PRIMARY;
 			} else {
 				if (ctx->verbose) printf("FAIL\n");
 				state = STATE_ERROR;
@@ -1229,18 +1327,28 @@ static int run_dnf_update_cycle(dnf_context_t *ctx, int repo_idx)
 			break;
 
 		case STATE_FETCH_PRIMARY:
-			if (ctx->verbose) printf("STATE: FETCH_PRIMARY ... ");
+			if (ctx->verbose) printf("STATE: FETCH_METADATA ... ");
 			{
-				char *wget_cmd;
-				int rc;
-				wget_cmd = xasprintf("wget -q -O %s \"%s\"", ctx->primary_xml_hash_path, ctx->primary_xml_url);
-				rc = system(wget_cmd);
-				free(wget_cmd);
+				int p_ok = 1;
+				if (access(primary_link, R_OK) != 0) {
+					char *wget_cmd = xasprintf("wget -q -O %s \"%s\"", ctx->primary_xml_hash_path, ctx->primary_xml_url);
+					if (system(wget_cmd) == 0 || access(ctx->primary_xml_hash_path, R_OK) == 0) {
+						unlink(primary_link);
+						sync_cache_file(ctx->primary_xml_hash_path, primary_link);
+					} else p_ok = 0;
+					free(wget_cmd);
+				}
+				if (ctx->group_xml_url[0] != '\0' && access(group_link, R_OK) != 0) {
+					char *wget_cmd = xasprintf("wget -q -O %s \"%s\"", ctx->group_xml_hash_path, ctx->group_xml_url);
+					if (system(wget_cmd) == 0 || access(ctx->group_xml_hash_path, R_OK) == 0) {
+						unlink(group_link);
+						sync_cache_file(ctx->group_xml_hash_path, group_link);
+					}
+					free(wget_cmd);
+				}
 
-				if (rc == 0 || access(ctx->primary_xml_hash_path, R_OK) == 0) {
+				if (p_ok) {
 					if (ctx->verbose) printf("PASS\n");
-					unlink(primary_link);
-					sync_cache_file(ctx->primary_xml_hash_path, primary_link);
 					state = STATE_PARSE_PRIMARY;
 				} else {
 					if (ctx->verbose) printf("FAIL\n");
@@ -1272,6 +1380,7 @@ static int run_dnf_update_cycle(dnf_context_t *ctx, int repo_idx)
 	free(cache_file);
 	free(repomd_file);
 	free(primary_link);
+	free(group_link);
 	free(mirror_cache);
 	return success;
 }
@@ -1291,7 +1400,7 @@ static int sync_repos(dnf_context_t *ctx, int force)
 
 			total_enabled++;
 			repomd_file = xasprintf("/var/cache/dnf/%s_repomd.xml", ctx->repos[i].id);
-			if (force || stat(repomd_file, &st) != 0 || (time(NULL) - st.st_mtime) > 3600 * 24) {
+			if (force || stat(repomd_file, &st) != 0 || (time(NULL) - st.st_mtime) > 3600 * 6) {
 				needed++;
 			}
 			free(repomd_file);
@@ -1311,7 +1420,7 @@ static int sync_repos(dnf_context_t *ctx, int force)
 
 			current++;
 			repomd_file = xasprintf("/var/cache/dnf/%s_repomd.xml", ctx->repos[i].id);
-			is_fresh = (stat(repomd_file, &st) == 0 && (time(NULL) - st.st_mtime) < 3600 * 24);
+			is_fresh = (stat(repomd_file, &st) == 0 && (time(NULL) - st.st_mtime) < 3600 * 6);
 
 			if (!ctx->verbose) {
 				printf(" (%d/%d): %-40s", current, total_enabled, ctx->repos[i].id);
@@ -1324,13 +1433,15 @@ static int sync_repos(dnf_context_t *ctx, int force)
 					synced++;
 			} else {
 				char *primary_link = xasprintf("/var/cache/dnf/%s_primary.raw", ctx->repos[i].id);
-				if (access(primary_link, R_OK) != 0) {
+				char *group_link = xasprintf("/var/cache/dnf/%s_group.raw", ctx->repos[i].id);
+				if (access(primary_link, R_OK) != 0 || access(group_link, R_OK) != 0) {
 					char *mirror_cache;
 					FILE *m_fp;
 
 					ctx->current_repo_idx = i;
 					ctx->target_mirror_url[0] = '\0';
-					
+					ctx->group_xml_hash_path[0] = '\0';
+
 					mirror_cache = xasprintf("/var/cache/dnf/%s_mirror.txt", ctx->repos[i].id);
 					m_fp = fopen(mirror_cache, "r");
 					if (m_fp) {
@@ -1352,8 +1463,12 @@ static int sync_repos(dnf_context_t *ctx, int force)
 					if (ctx->primary_xml_hash_path[0] && access(ctx->primary_xml_hash_path, R_OK) == 0) {
 						sync_cache_file(ctx->primary_xml_hash_path, primary_link);
 					}
+					if (ctx->group_xml_hash_path[0] && access(ctx->group_xml_hash_path, R_OK) == 0) {
+						sync_cache_file(ctx->group_xml_hash_path, group_link);
+					}
 				}
 				free(primary_link);
+				free(group_link);
 				free(repomd_file);
 
 				if (!ctx->verbose) printf("[%sOK%s]\n", CLR_GREEN, CLR_RESET);
@@ -1369,18 +1484,178 @@ static int sync_repos(dnf_context_t *ctx, int force)
 }
 
 typedef struct {
-	char **pkgs;
+	pkg_t *items;
 	int count;
 } dep_list_t;
+
+static void free_pkg_contents(pkg_t *pkg)
+{
+	free(pkg->name); free(pkg->epoch); free(pkg->version);
+	free(pkg->release); free(pkg->arch); free(pkg->summary);
+	free(pkg->license); free(pkg->url); free(pkg->location);
+	free(pkg->description); free(pkg->depends); free(pkg->repo_id);
+	memset(pkg, 0, sizeof(*pkg));
+}
 
 static void add_to_dep_list(dep_list_t *list, const char *name)
 {
 	int i;
 	for (i = 0; i < list->count; i++) {
-		if (strcmp(list->pkgs[i], name) == 0) return;
+		if (strcmp(list->items[i].name, name) == 0) return;
 	}
-	list->pkgs = xrealloc(list->pkgs, (list->count + 1) * sizeof(char *));
-	list->pkgs[list->count++] = xstrdup(name);
+	list->items = xrealloc(list->items, (list->count + 1) * sizeof(pkg_t));
+	memset(&list->items[list->count], 0, sizeof(pkg_t));
+	list->items[list->count].name = xstrdup(name);
+	list->count++;
+}
+
+static void resolve_cb(dnf_context_t *ctx, pkg_t *pkg, void *user_data)
+{
+	dep_list_t *list = (dep_list_t *)user_data;
+	int i;
+
+	for (i = 0; i < list->count; i++) {
+		int match_found = 0;
+		if (strcmp(list->items[i].name, pkg->name) == 0) {
+			match_found = 1;
+		} else if (pkg->provides) {
+			char *prov_copy = xstrdup(pkg->provides);
+			char *p = strtok(prov_copy, " ");
+			while (p) {
+				// Match base name or exact name
+				// Many capabilities look like "name(arch)" or "name = version"
+				if (strcmp(list->items[i].name, p) == 0) {
+					match_found = 1;
+					break;
+				}
+				// Check for config(path) or config(name)
+				if (strncmp(p, "config(", 7) == 0) {
+					char *clean_p = xstrdup(p + 7);
+					char *end = strrchr(clean_p, ')');
+					if (end) *end = '\0';
+					if (strcmp(list->items[i].name, clean_p) == 0) {
+						match_found = 1;
+						free(clean_p);
+						break;
+					}
+					free(clean_p);
+				}
+				// Also try matching without architecture suffix for cases like NetworkManager-l2tp(x86-64)
+				char *paren = strchr(p, '(');
+				if (paren) {
+					*paren = '\0';
+					if (strcmp(list->items[i].name, p) == 0) {
+						match_found = 1;
+						break;
+					}
+					*paren = '('; // restore
+				}
+				// Handle file provides like /usr/bin/sh
+				if (p[0] == '/' && strcmp(list->items[i].name, p) == 0) {
+					match_found = 1;
+					break;
+				}
+				// Handle capabilities like desktop-notification-daemon
+				if (strcmp(list->items[i].name, p) == 0) {
+					match_found = 1;
+					break;
+				}
+				p = strtok(NULL, " ");
+			}
+			free(prov_copy);
+		}
+
+		if (match_found) {
+			pkg_t *match = &list->items[i];
+			int replace = 0;
+
+			if (!match->location) {
+				replace = 1;
+			} else {
+				char *full_ver = xasprintf("%s:%s-%s", pkg->epoch, pkg->version, pkg->release);
+				char *best_ver = xasprintf("%s:%s-%s", match->epoch, match->version, match->release);
+				int cmp = compare_versions(full_ver, best_ver);
+				if (cmp > 0) replace = 1;
+				else if (cmp == 0 && strcmp(pkg->arch, ctx->basearch) == 0 && strcmp(match->arch, ctx->basearch) != 0)
+					replace = 1;
+				free(full_ver); free(best_ver);
+			}
+
+			if (replace) {
+				char *saved_name = match->name;
+				match->name = NULL;
+				free_pkg_contents(match);
+				match->name = saved_name;
+
+				match->epoch = xstrdup(pkg->epoch);
+				match->version = xstrdup(pkg->version);
+				match->release = xstrdup(pkg->release);
+				match->arch = xstrdup(pkg->arch);
+				match->summary = xstrdup(pkg->summary);
+				match->license = xstrdup(pkg->license);
+				match->url = xstrdup(pkg->url);
+				match->location = xstrdup(pkg->location);
+				match->description = xstrdup(pkg->description);
+				match->depends = xstrdup(pkg->depends);
+				match->repo_id = xstrdup(pkg->repo_id);
+
+				if (match->depends) {
+					char *deps = xstrdup(match->depends);
+					char *p = strtok(deps, " ");
+					while (p) {
+						if (!is_package_installed(p)) {
+							int old_count = list->count;
+							add_to_dep_list(list, p);
+							if (list->count > old_count) {
+								printf("%s ", p);
+								/* Print a newline every few packages to keep output manageable for copy-paste */
+								if (list->count % 5 == 0) printf("\n");
+								fflush(stdout);
+							}
+						}
+						p = strtok(NULL, " ");
+					}
+					free(deps);
+				}
+			}
+			/* Continue scanning, might find other packages in list */
+		}
+	}
+}
+
+static void resolve_all_dependencies(dnf_context_t *ctx, dep_list_t *list)
+{
+	int i, last_count = 0;
+	int all_resolved = 0;
+
+	while (!all_resolved) {
+		all_resolved = 1;
+		for (i = 0; i < list->count; i++) {
+			if (!list->items[i].location) {
+				all_resolved = 0;
+				break;
+			}
+		}
+		if (all_resolved) break;
+
+		if (list->count == last_count) {
+			/* No new names added, and some are still unresolved.
+			 * We've tried all repos. Give up on those names. */
+			break;
+		}
+		last_count = list->count;
+
+		for (i = 0; i < ctx->repo_count; i++) {
+			if (ctx->repos[i].enabled) {
+				char *primary_file = xasprintf("/var/cache/dnf/%s_primary.raw", ctx->repos[i].id);
+				if (access(primary_file, R_OK) == 0) {
+					ctx->current_repo_idx = i;
+					parse_primary_stream(ctx, primary_file, resolve_cb, list);
+				}
+				free(primary_file);
+			}
+		}
+	}
 }
 
 static void get_package_info(dnf_context_t *ctx, const char *name, pkg_t *best_match)
@@ -1403,43 +1678,6 @@ static void get_package_info(dnf_context_t *ctx, const char *name, pkg_t *best_m
 	ctx->info_target = NULL;
 }
 
-static void resolve_dependencies(dnf_context_t *ctx, const char *pkg_name, dep_list_t *list, install_mode_t mode, int is_target)
-{
-	pkg_t best_match;
-	int i;
-
-	for (i = 0; i < list->count; i++) {
-		if (strcmp(list->pkgs[i], pkg_name) == 0) return;
-	}
-
-	if (!is_target && is_package_installed(pkg_name)) {
-		return;
-	}
-	
-	get_package_info(ctx, pkg_name, &best_match);
-	if (!best_match.name) {
-		if (ctx->verbose) printf("[DEBUG] Dependency %s not found in repos.\n", pkg_name);
-		return;
-	}
-	
-	add_to_dep_list(list, best_match.name);
-	
-	if (best_match.depends) {
-		char *deps = xstrdup(best_match.depends);
-		char *p = strtok(deps, " ");
-		while (p) {
-			resolve_dependencies(ctx, p, list, mode, 0);
-			p = strtok(NULL, " ");
-		}
-		free(deps);
-	}
-	
-	free(best_match.name); free(best_match.epoch); free(best_match.version);
-	free(best_match.release); free(best_match.arch); free(best_match.summary);
-	free(best_match.license); free(best_match.url); free(best_match.location);
-	free(best_match.description); free(best_match.depends); free(best_match.repo_id);
-}
-
 static void perform_rescue_install(dnf_context_t *ctx, char **packages, int num_packages, install_mode_t mode)
 {
 	dep_list_t list = { NULL, 0 };
@@ -1447,36 +1685,60 @@ static void perform_rescue_install(dnf_context_t *ctx, char **packages, int num_
 	int needed = 0;
 	char *batch_rpms = xstrdup("");
 
-	printf("Resolving dependencies...\n");
 	for (i = 0; i < num_packages; i++) {
 		if (mode == MODE_INSTALL && is_package_installed(packages[i])) {
-			printf("Package %s is already installed.\n", packages[i]);
+			// Don't print "already installed" here if it's part of a large batch
+			if (num_packages < 5) printf("Package %s is already installed.\n", packages[i]);
 			continue;
 		}
 		needed++;
-		resolve_dependencies(ctx, packages[i], &list, mode, 1);
+		// Add without printing immediately to avoid duplicates from group expansion
+		{
+			int found = 0;
+			int j;
+			for (j = 0; j < list.count; j++) {
+				if (strcmp(list.items[j].name, packages[i]) == 0) { found = 1; break; }
+			}
+			if (!found) {
+				list.items = xrealloc(list.items, (list.count + 1) * sizeof(pkg_t));
+				memset(&list.items[list.count], 0, sizeof(pkg_t));
+				list.items[list.count].name = xstrdup(packages[i]);
+				list.count++;
+			}
+		}
 	}
-	
+
+	if (needed > 0) {
+		resolve_all_dependencies(ctx, &list);
+		printf("\n");
+	}
+
 	if (list.count == 0) {
 		if (needed > 0) printf("Nothing to do.\n");
 		free(batch_rpms);
 		return;
 	}
+
+	for (i = 0; i < list.count; i++) {
+		if (!list.items[i].location) {
+			printf("[ERROR] Package not found: %s\n", list.items[i].name);
+			goto cleanup;
+		}
+	}
 	
 	printf("Dependencies resolved. Packages to install:\n\n");
 	for (i = 0; i < list.count; i++) {
-		printf("%s%s", i == 0 ? "" : " ", list.pkgs[i]);
+		printf("%s%s", i == 0 ? "" : " ", list.items[i].name);
 	}
 	printf("\n\n");
 
 	for (i = 0; i < list.count; i++) {
-		pkg_t best_match;
-		get_package_info(ctx, list.pkgs[i], &best_match);
-		if (best_match.name && best_match.location) {
+		pkg_t *best_match = &list.items[i];
+		if (best_match->name && best_match->location) {
 			char *mirror = NULL;
 			int j;
 			for (j = 0; j < ctx->repo_count; j++) {
-				if (strcmp(ctx->repos[j].id, best_match.repo_id) == 0) {
+				if (strcmp(ctx->repos[j].id, best_match->repo_id) == 0) {
 					char *mirror_cache = xasprintf("/var/cache/dnf/%s_mirror.txt", ctx->repos[j].id);
 					FILE *fp = fopen(mirror_cache, "r");
 					if (fp) {
@@ -1497,35 +1759,35 @@ static void perform_rescue_install(dnf_context_t *ctx, char **packages, int num_
 			}
 			
 			if (mirror) {
-				char *rpm_url = xasprintf("%s/%s", mirror, best_match.location);
-				char *rpm_file = xasprintf("/var/cache/dnf/%s.rpm", best_match.name);
+				char *rpm_url = xasprintf("%s/%s", mirror, best_match->location);
+				char *bname = strrchr(best_match->location, '/');
+				if (!bname) bname = best_match->location; else bname++;
+				char *rpm_file = xasprintf("/var/cache/dnf/%s", bname);
 				char *cmd;
 				
-				printf("Get:%d %s [%s]\n", i + 1, rpm_url, best_match.repo_id);
+				printf("Get:%d %s [%s]\n", i + 1, rpm_url, best_match->repo_id);
 				cmd = xasprintf("wget -q -O %s \"%s\"", rpm_file, rpm_url);
 				system(cmd);
 				free(cmd);
 				
 				if (mode == MODE_RESCUE) {
-					printf("Extracting %s (rescue install)...\n", best_match.name);
+					printf("Extracting %s (rescue install)...\n", best_match->name);
 					cmd = xasprintf("rpm2cpio %s | cpio -idmuv --quiet", rpm_file);
 					system(cmd);
 					free(cmd);
 				} else {
-					char *tmp = xasprintf("%s %s", batch_rpms, rpm_file);
-					free(batch_rpms);
-					batch_rpms = tmp;
+					// Deduplicate RPMs in the batch transaction
+					if (!strstr(batch_rpms, rpm_file)) {
+						char *tmp = xasprintf("%s %s", batch_rpms, rpm_file);
+						free(batch_rpms);
+						batch_rpms = tmp;
+					}
 				}
 				
 				free(rpm_url);
 				free(rpm_file);
 				free(mirror);
 			}
-			
-			free(best_match.name); free(best_match.epoch); free(best_match.version);
-			free(best_match.release); free(best_match.arch); free(best_match.summary);
-			free(best_match.license); free(best_match.url); free(best_match.location);
-			free(best_match.description); free(best_match.depends); free(best_match.repo_id);
 		}
 	}
 
@@ -1540,10 +1802,23 @@ static void perform_rescue_install(dnf_context_t *ctx, char **packages, int num_
 		system(cmd);
 		free(cmd);
 	}
+
+	/* Cleanup downloaded RPMs */
+	for (i = 0; i < list.count; i++) {
+		pkg_t *best_match = &list.items[i];
+		if (best_match->location) {
+			char *bname = strrchr(best_match->location, '/');
+			if (!bname) bname = best_match->location; else bname++;
+			char *rpm_file = xasprintf("/var/cache/dnf/%s", bname);
+			unlink(rpm_file);
+			free(rpm_file);
+		}
+	}
 	
+cleanup:
 	free(batch_rpms);
-	for (i = 0; i < list.count; i++) free(list.pkgs[i]);
-	free(list.pkgs);
+	for (i = 0; i < list.count; i++) free_pkg_contents(&list.items[i]);
+	free(list.items);
 }
 
 static void format_size(long long bytes, char *buf, int buf_size) {
@@ -1637,6 +1912,107 @@ static void perform_remove(dnf_context_t *ctx, char **packages, int num_packages
 	free(batch);
 }
 
+static void parse_comps_stream(const char *cache_path, const char *group_target, dep_list_t *list)
+{
+	char *cmd;
+	FILE *fp;
+	char line[1024];
+	int in_group = 0;
+	int target_found = 0;
+	int in_packagelist = 0;
+
+	cmd = xasprintf("unzstd -c %s 2>/dev/null || zcat %s 2>/dev/null || xzcat %s 2>/dev/null || cat %s",
+					cache_path, cache_path, cache_path, cache_path);
+	fp = popen(cmd, "r");
+	free(cmd);
+
+	if (!fp) return;
+
+	while (fgets(line, sizeof(line), fp)) {
+		if (strstr(line, "<group>")) {
+			in_group = 1;
+			target_found = 0;
+		}
+		if (in_group) {
+			char val[256];
+			if (get_tag_value(line, "id", val, sizeof(val)) || get_tag_value(line, "name", val, sizeof(val))) {
+				if (strcmp(val, group_target) == 0) {
+					target_found = 1;
+				}
+			}
+			if (target_found && strstr(line, "<packagelist>")) {
+				in_packagelist = 1;
+			}
+			if (in_packagelist) {
+				if (strstr(line, "<packagereq")) {
+					char *type = strstr(line, "type=\"");
+					if (type) {
+						type += 6;
+						if (strncmp(type, "mandatory", 9) == 0 || strncmp(type, "default", 7) == 0) {
+							char *p = strchr(line, '>');
+							if (p) {
+								char *end;
+								p++;
+								end = strchr(p, '<');
+								if (end) {
+									char *pkg_name = xstrndup(p, end - p);
+									int old_count = list->count;
+									add_to_dep_list(list, pkg_name);
+									if (list->count > old_count) {
+										printf("%s ", pkg_name);
+										fflush(stdout);
+									}
+									free(pkg_name);
+								}
+							}
+						}
+					}
+				}
+				if (strstr(line, "</packagelist>")) {
+					in_packagelist = 0;
+					in_group = 0;
+				}
+			}
+		}
+		if (strstr(line, "</group>")) {
+			in_group = 0;
+			in_packagelist = 0;
+		}
+	}
+	pclose(fp);
+}
+
+static void perform_group_install(dnf_context_t *ctx, char **groups, int num_groups, install_mode_t mode)
+{
+	dep_list_t pkgs = { NULL, 0 };
+	int i, j;
+	char **names;
+
+	printf("Resolving dependencies...\n");
+	for (i = 0; i < num_groups; i++) {
+		for (j = 0; j < ctx->repo_count; j++) {
+			if (ctx->repos[j].enabled) {
+				char *group_file = xasprintf("/var/cache/dnf/%s_group.raw", ctx->repos[j].id);
+				if (access(group_file, R_OK) == 0) {
+					parse_comps_stream(group_file, groups[i], &pkgs);
+				}
+				free(group_file);
+			}
+		}
+	}
+
+	if (pkgs.count > 0) {
+		names = xmalloc(pkgs.count * sizeof(char *));
+		for (i = 0; i < pkgs.count; i++) names[i] = pkgs.items[i].name;
+		perform_rescue_install(ctx, names, pkgs.count, mode);
+		free(names);
+		for (i = 0; i < pkgs.count; i++) free_pkg_contents(&pkgs.items[i]);
+		free(pkgs.items);
+	} else {
+		printf("Warning: Group %s does not exist.\n", groups[0]);
+	}
+}
+
 int dnf_main(int argc, char **argv) MAIN_EXTERNALLY_VISIBLE;
 int dnf_main(int argc UNUSED_PARAM, char **argv)
 {
@@ -1719,7 +2095,20 @@ int dnf_main(int argc UNUSED_PARAM, char **argv)
 		load_repos(&ctx);
 		if (sync_repos(&ctx, 0) > 0) {
 			while (argv[num_pkgs + 1]) num_pkgs++;
+			printf("Resolving dependencies...\n");
 			perform_rescue_install(&ctx, argv + 1, num_pkgs, mode);
+		} else {
+			bb_error_msg_and_die("failed to initialize repository context");
+		}
+	} else if (strcmp(command, "groupinstall") == 0) {
+		int num_groups = 0;
+		if (!argv[1]) bb_show_usage();
+		ctx.releasever = get_releasever();
+		ctx.basearch = get_basearch();
+		load_repos(&ctx);
+		if (sync_repos(&ctx, 0) > 0) {
+			while (argv[num_groups + 1]) num_groups++;
+			perform_group_install(&ctx, argv + 1, num_groups, MODE_INSTALL);
 		} else {
 			bb_error_msg_and_die("failed to initialize repository context");
 		}
@@ -1814,12 +2203,13 @@ int dnf_main(int argc UNUSED_PARAM, char **argv)
 				if (fname && hash && hash[0] != '(' && hash[0] != '\0') {
 					const char *tool = "md5sum";
 					int hlen = strlen(hash);
+					char *cmd_check;
 
 					/* Detect algorithm by hash length */
 					if (hlen == 64) tool = "sha256sum";
 					else if (hlen == 40) tool = "sha1sum";
 
-					char *cmd_check = xasprintf("echo \"%s  %s\" | %s -c --status 2>/dev/null", hash, fname, tool);
+					cmd_check = xasprintf("echo \"%s  %s\" | %s -c --status 2>/dev/null", hash, fname, tool);
 					if (system(cmd_check) != 0) {
 						printf("%s%s: FAILED%s\n", CLR_RED, fname, CLR_RESET);
 						failed++;
