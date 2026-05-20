@@ -685,14 +685,16 @@ static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path, pkg
 
 			/* Parse <file> tags which are also providers in RPM metadata */
 			char *file_ptr = pkg_buf;
-			while ((file_ptr = strstr(file_ptr, "<file>")) != NULL) {
-				char *file_end = strstr(file_ptr, "</file>");
+			while ((file_ptr = strstr(file_ptr, "<file")) != NULL) {
+				char *file_data_start = strchr(file_ptr, '>');
+				if (!file_data_start) break;
+				file_data_start++;
+				char *file_end = strstr(file_data_start, "</file>");
 				if (file_end) {
-					file_ptr += 6;
-					int f_len = file_end - file_ptr;
+					int f_len = file_end - file_data_start;
 					if (f_len > 0 && f_len < 256) {
 						char fname[256];
-						memcpy(fname, file_ptr, f_len);
+						memcpy(fname, file_data_start, f_len);
 						fname[f_len] = '\0';
 						if (strlen(provides) + f_len + 2 < 16384) {
 							if (provides[0]) strcat(provides, " ");
@@ -701,7 +703,7 @@ static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path, pkg
 					}
 					file_ptr = file_end + 7;
 				} else {
-					break;
+					file_ptr++;
 				}
 			}
 
@@ -870,9 +872,10 @@ static void load_installed_packages(void)
 	if (!fp) return;
 
 	while (fgets(line, sizeof(line), fp)) {
-		char *name = strtok(line, " \t");
-		char *evr = strtok(NULL, " \t");
-		char *arch = strtok(NULL, " \t\n");
+		char *saveptr;
+		char *name = strtok_r(line, " \t", &saveptr);
+		char *evr = strtok_r(NULL, " \t", &saveptr);
+		char *arch = strtok_r(NULL, " \t\n", &saveptr);
 
 		if (name && evr && arch) {
 			pkg_t *p;
@@ -922,14 +925,24 @@ static int is_package_installed(const char *name)
 	pkg_t key;
 	pkg_t *inst;
 	
-	if (name[0] == '/' && access(name, F_OK) == 0) return 1;
+	if (name[0] == '/') return (access(name, F_OK) == 0);
 
 	if (!installed_packages) load_installed_packages();
 	if (num_installed == 0) return 0;
 	
 	key.name = (char *)name;
 	inst = bsearch(&key, installed_packages, num_installed, sizeof(pkg_t), cmp_pkg_name);
-	return inst != NULL;
+	if (inst) return 1;
+
+	/* If not found by name, it might be a capability (Provides) installed on the system */
+	{
+		char *cmd = xasprintf("rpm -q --whatprovides '%s' >/dev/null 2>&1", name);
+		int rc = system(cmd);
+		free(cmd);
+		if (rc == 0) return 1;
+	}
+
+	return 0;
 }
 
 static int check_deps_sanity(dnf_context_t *ctx UNUSED_PARAM, pkg_t *p)
@@ -944,6 +957,7 @@ static int check_deps_sanity(dnf_context_t *ctx UNUSED_PARAM, pkg_t *p)
 
 	while (dep_entry) {
 		if (!is_package_installed(dep_entry)) {
+			if (failed_count == 0) printf("\n");
 			printf("    %s[ERROR]%s Missing dependency: %s\n", CLR_RED, CLR_RESET, dep_entry);
 			failed_count++;
 		}
@@ -956,9 +970,11 @@ static int check_deps_sanity(dnf_context_t *ctx UNUSED_PARAM, pkg_t *p)
 static int check_files_sanity(const char *pkg_name)
 {
 	int failed_count = 0;
-	char *cmd = xasprintf("rpm -ql %s", pkg_name);
+	/* Sort the file list to reliably deduplicate shared files between architectures */
+	char *cmd = xasprintf("rpm -ql %s | sort", pkg_name);
 	FILE *f = popen(cmd, "r");
 	char *line;
+	char *last_line = NULL;
 
 	if (!f) {
 		free(cmd);
@@ -967,18 +983,29 @@ static int check_files_sanity(const char *pkg_name)
 
 	while ((line = xmalloc_fgetline(f)) != NULL) {
 		struct stat st;
+
+		if (last_line && strcmp(line, last_line) == 0) {
+			free(line);
+			continue;
+		}
+		free(last_line);
+		last_line = xstrdup(line);
+
 		if (lstat(line, &st) != 0) {
+			if (failed_count == 0) printf("\n");
 			printf("    %s[MISSING]%s %s\n", CLR_RED, CLR_RESET, line);
 			failed_count++;
 		} else if (S_ISLNK(st.st_mode)) {
 			struct stat st2;
 			if (stat(line, &st2) != 0) {
+				if (failed_count == 0) printf("\n");
 				printf("    %s[BROKEN LINK]%s %s\n", CLR_RED, CLR_RESET, line);
 				failed_count++;
 			}
 		}
 		free(line);
 	}
+	free(last_line);
 	pclose(f);
 	free(cmd);
 	return failed_count;
@@ -1520,7 +1547,8 @@ static void resolve_cb(dnf_context_t *ctx, pkg_t *pkg, void *user_data)
 			match_found = 1;
 		} else if (pkg->provides) {
 			char *prov_copy = xstrdup(pkg->provides);
-			char *p = strtok(prov_copy, " ");
+			char *saveptr_prov;
+			char *p = strtok_r(prov_copy, " ", &saveptr_prov);
 			while (p) {
 				// Match base name or exact name
 				// Many capabilities look like "name(arch)" or "name = version"
@@ -1560,7 +1588,7 @@ static void resolve_cb(dnf_context_t *ctx, pkg_t *pkg, void *user_data)
 					match_found = 1;
 					break;
 				}
-				p = strtok(NULL, " ");
+				p = strtok_r(NULL, " ", &saveptr_prov);
 			}
 			free(prov_copy);
 		}
@@ -1583,37 +1611,43 @@ static void resolve_cb(dnf_context_t *ctx, pkg_t *pkg, void *user_data)
 
 			if (replace) {
 				char *saved_name = match->name;
-				match->name = NULL;
-				free_pkg_contents(match);
-				match->name = saved_name;
+				// If the match was by capability/file, but we found a package,
+				// update the name to the actual package name for clearer logging
+				if (saved_name[0] == '/' || strstr(saved_name, ".so")) {
+					free(saved_name);
+					match->name = xstrdup(pkg->name);
+				} else {
+					match->name = saved_name;
+				}
 
-				match->epoch = xstrdup(pkg->epoch);
-				match->version = xstrdup(pkg->version);
-				match->release = xstrdup(pkg->release);
-				match->arch = xstrdup(pkg->arch);
-				match->summary = xstrdup(pkg->summary);
-				match->license = xstrdup(pkg->license);
-				match->url = xstrdup(pkg->url);
-				match->location = xstrdup(pkg->location);
-				match->description = xstrdup(pkg->description);
-				match->depends = xstrdup(pkg->depends);
-				match->repo_id = xstrdup(pkg->repo_id);
+				free(match->epoch); match->epoch = xstrdup(pkg->epoch);
+				free(match->version); match->version = xstrdup(pkg->version);
+				free(match->release); match->release = xstrdup(pkg->release);
+				free(match->arch); match->arch = xstrdup(pkg->arch);
+				free(match->summary); match->summary = xstrdup(pkg->summary);
+				free(match->license); match->license = xstrdup(pkg->license);
+				free(match->url); match->url = xstrdup(pkg->url);
+				free(match->location); match->location = xstrdup(pkg->location);
+				free(match->description); match->description = xstrdup(pkg->description);
+				free(match->depends); match->depends = xstrdup(pkg->depends);
+				free(match->repo_id); match->repo_id = xstrdup(pkg->repo_id);
 
 				if (match->depends) {
 					char *deps = xstrdup(match->depends);
-					char *p = strtok(deps, " ");
-					while (p) {
-						if (!is_package_installed(p)) {
+					char *saveptr_dep;
+					char *p_dep = strtok_r(deps, " ", &saveptr_dep);
+					while (p_dep) {
+						if (!is_package_installed(p_dep)) {
 							int old_count = list->count;
-							add_to_dep_list(list, p);
+							add_to_dep_list(list, p_dep);
 							if (list->count > old_count) {
-								printf("%s ", p);
+								printf("%s ", p_dep);
 								/* Print a newline every few packages to keep output manageable for copy-paste */
 								if (list->count % 5 == 0) printf("\n");
 								fflush(stdout);
 							}
 						}
-						p = strtok(NULL, " ");
+						p_dep = strtok_r(NULL, " ", &saveptr_dep);
 					}
 					free(deps);
 				}
@@ -1847,10 +1881,11 @@ static void perform_remove(dnf_context_t *ctx, char **packages, int num_packages
 		fp = popen(cmd, "r");
 		if (fp) {
 			while (fgets(line, sizeof(line), fp)) {
-				char *name = strtok(line, "|");
-				char *arch = strtok(NULL, "|");
-				char *evr = strtok(NULL, "|");
-				char *size_str = strtok(NULL, "\n");
+				char *saveptr;
+				char *name = strtok_r(line, "|", &saveptr);
+				char *arch = strtok_r(NULL, "|", &saveptr);
+				char *evr = strtok_r(NULL, "|", &saveptr);
+				char *size_str = strtok_r(NULL, "\n", &saveptr);
 
 				if (name && arch && evr && size_str) {
 					char *tmp;
@@ -2150,13 +2185,17 @@ int dnf_main(int argc UNUSED_PARAM, char **argv)
 					fflush(stdout);
 					d_failed = check_deps_sanity(&ctx, &best_match);
 					if (d_failed == 0) printf("%sOK%s\n", CLR_GREEN, CLR_RESET);
-					else printf("%sFAILED (%d missing)%s\n", CLR_RED, d_failed, CLR_RESET);
+					else {
+						printf("%sFAILED (%d missing)%s\n", CLR_RED, d_failed, CLR_RESET);
+					}
 
 					printf("  [CHECK] Filesystem... ");
 					fflush(stdout);
 					f_failed = check_files_sanity(argv[i]);
 					if (f_failed == 0) printf("%sOK%s\n", CLR_GREEN, CLR_RESET);
-					else printf("%sFAILED (%d issues)%s\n", CLR_RED, f_failed, CLR_RESET);
+					else {
+						printf("%sFAILED (%d issues)%s\n", CLR_RED, f_failed, CLR_RESET);
+					}
 
 					total_failed = d_failed + f_failed;
 				} else {
