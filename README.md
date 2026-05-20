@@ -64,7 +64,7 @@ Commands:
 ./busybox dnf verify glibc
 
 # perform smart inquiry via: (capabilities)
-# ./busybox dnf reinstall "libmagic.so.1"
+./busybox dnf reinstall "libmagic.so.1"
 ./busybox dnf verify "libmagic.so.1"
 ```
 
