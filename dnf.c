@@ -543,6 +543,9 @@ static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path, pkg
 			char *loc_ptr;
 			char *v_tag;
 			char *req_start;
+			char *provides;
+			char *prov_start;
+			char *file_ptr;
 			pkg_t pkg;
 
 			if (!pkg_end) break;
@@ -658,8 +661,8 @@ static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path, pkg
 				}
 			}
 
-			char *provides = xzalloc(16384);
-			char *prov_start = strstr(pkg_buf, "<rpm:provides>");
+			provides = xzalloc(16384);
+			prov_start = strstr(pkg_buf, "<rpm:provides>");
 			if (prov_start) {
 				char *prov_end = strstr(prov_start, "</rpm:provides>");
 				char *entry = prov_start;
@@ -684,26 +687,28 @@ static void parse_primary_stream(dnf_context_t *ctx, const char *cache_path, pkg
 			}
 
 			/* Parse <file> tags which are also providers in RPM metadata */
-			char *file_ptr = pkg_buf;
+			file_ptr = pkg_buf;
 			while ((file_ptr = strstr(file_ptr, "<file")) != NULL) {
 				char *file_data_start = strchr(file_ptr, '>');
 				if (!file_data_start) break;
 				file_data_start++;
-				char *file_end = strstr(file_data_start, "</file>");
-				if (file_end) {
-					int f_len = file_end - file_data_start;
-					if (f_len > 0 && f_len < 256) {
-						char fname[256];
-						memcpy(fname, file_data_start, f_len);
-						fname[f_len] = '\0';
-						if (strlen(provides) + f_len + 2 < 16384) {
-							if (provides[0]) strcat(provides, " ");
-							strcat(provides, fname);
+				{
+					char *file_end = strstr(file_data_start, "</file>");
+					if (file_end) {
+						int f_len = file_end - file_data_start;
+						if (f_len > 0 && f_len < 256) {
+							char fname[256];
+							memcpy(fname, file_data_start, f_len);
+							fname[f_len] = '\0';
+							if (strlen(provides) + f_len + 2 < 16384) {
+								if (provides[0]) strcat(provides, " ");
+								strcat(provides, fname);
+							}
 						}
+						file_ptr = file_end + 7;
+					} else {
+						file_ptr++;
 					}
-					file_ptr = file_end + 7;
-				} else {
-					file_ptr++;
 				}
 			}
 
@@ -785,11 +790,12 @@ static void query_cb(dnf_context_t *ctx, pkg_t *pkg, void *user_data)
 			char *saveptr;
 			char *p = strtok_r(prov_copy, " ", &saveptr);
 			while (p) {
+				char *paren;
 				if (strcmp(ctx->info_target, p) == 0) {
 					match_found = 1;
 					break;
 				}
-				char *paren = strchr(p, '(');
+				paren = strchr(p, '(');
 				if (paren) {
 					*paren = '\0';
 					if (strcmp(ctx->info_target, p) == 0) {
@@ -839,6 +845,9 @@ static void query_cb(dnf_context_t *ctx, pkg_t *pkg, void *user_data)
 	}
 }
 
+static void free_pkg_contents(pkg_t *pkg);
+static void get_package_info(dnf_context_t *ctx, const char *name, pkg_t *best_match);
+
 static void perform_queries(dnf_context_t *ctx)
 {
 	pkg_t best_match;
@@ -871,10 +880,7 @@ static void perform_queries(dnf_context_t *ctx)
 		printf("\033[1mRepository    \033[0m: %s\n", best_match.repo_id);
 		printf("\n");
 		
-		free(best_match.name); free(best_match.epoch); free(best_match.version);
-		free(best_match.release); free(best_match.arch); free(best_match.summary);
-		free(best_match.license); free(best_match.url); free(best_match.location); 
-		free(best_match.description); free(best_match.depends); free(best_match.repo_id);
+		free_pkg_contents(&best_match);
 	}
 }
 
@@ -947,9 +953,6 @@ static void load_installed_packages(void)
 		qsort(installed_packages, num_installed, sizeof(pkg_t), cmp_pkg_name);
 	}
 }
-
-static void free_pkg_contents(pkg_t *pkg);
-static void get_package_info(dnf_context_t *ctx, const char *name, pkg_t *best_match);
 
 static int is_package_installed(dnf_context_t *ctx, const char *name)
 {
@@ -1614,14 +1617,16 @@ static void resolve_cb(dnf_context_t *ctx, pkg_t *pkg, void *user_data)
 					free(clean_p);
 				}
 				// Also try matching without architecture suffix for cases like NetworkManager-l2tp(x86-64)
-				char *paren = strchr(p, '(');
-				if (paren) {
-					*paren = '\0';
-					if (strcmp(list->items[i].name, p) == 0) {
-						match_found = 1;
-						break;
+				{
+					char *paren = strchr(p, '(');
+					if (paren) {
+						*paren = '\0';
+						if (strcmp(list->items[i].name, p) == 0) {
+							match_found = 1;
+							break;
+						}
+						*paren = '('; // restore
 					}
-					*paren = '('; // restore
 				}
 				// Handle file provides like /usr/bin/sh
 				if (p[0] == '/' && strcmp(list->items[i].name, p) == 0) {
@@ -1838,10 +1843,12 @@ static void perform_rescue_install(dnf_context_t *ctx, char **packages, int num_
 			if (mirror) {
 				char *rpm_url = xasprintf("%s/%s", mirror, best_match->location);
 				char *bname = strrchr(best_match->location, '/');
-				if (!bname) bname = best_match->location; else bname++;
-				char *rpm_file = xasprintf("/var/cache/dnf/%s", bname);
+				char *rpm_file;
 				char *cmd;
-				
+
+				if (!bname) bname = best_match->location; else bname++;
+				rpm_file = xasprintf("/var/cache/dnf/%s", bname);
+
 				printf("Get:%d %s [%s]\n", i + 1, rpm_url, best_match->repo_id);
 				cmd = xasprintf("wget -q -O %s \"%s\"", rpm_file, rpm_url);
 				system(cmd);
@@ -1885,8 +1892,9 @@ static void perform_rescue_install(dnf_context_t *ctx, char **packages, int num_
 		pkg_t *best_match = &list.items[i];
 		if (best_match->location) {
 			char *bname = strrchr(best_match->location, '/');
+			char *rpm_file;
 			if (!bname) bname = best_match->location; else bname++;
-			char *rpm_file = xasprintf("/var/cache/dnf/%s", bname);
+			rpm_file = xasprintf("/var/cache/dnf/%s", bname);
 			unlink(rpm_file);
 			free(rpm_file);
 		}
@@ -2247,10 +2255,7 @@ int dnf_main(int argc UNUSED_PARAM, char **argv)
 				} else {
 					total_failed = 1;
 				}
-				free(best_match.name); free(best_match.epoch); free(best_match.version);
-				free(best_match.release); free(best_match.arch); free(best_match.summary);
-				free(best_match.license); free(best_match.url); free(best_match.location);
-				free(best_match.description); free(best_match.depends); free(best_match.repo_id);
+				free_pkg_contents(&best_match);
 			} else {
 				printf("  [WARN] Package metadata not found in cache.\n");
 				total_failed = 1;
@@ -2266,26 +2271,42 @@ int dnf_main(int argc UNUSED_PARAM, char **argv)
 		int i;
 		if (!argv[1]) bb_show_usage();
 
+		ctx.releasever = get_releasever();
+		ctx.basearch = get_basearch();
+		load_repos(&ctx);
+		sync_repos(&ctx, 0);
+
 		for (i = 1; argv[i]; i++) {
 			char *target = xstrdup(argv[i]);
 			char *cmd;
+			char *check_pkg;
 			FILE *f;
 			char *line;
 			int checked = 0, failed = 0;
+			pkg_t best_match;
 
-			/* Check if target is a package name, if not try to resolve it to a package name */
-			char *check_pkg = xasprintf("rpm -q %s >/dev/null 2>&1", target);
+			/* Try to resolve capability to package name via metadata first (smart inquiry) */
+			get_package_info(&ctx, target, &best_match);
+			if (best_match.name) {
+				free(target);
+				target = xstrdup(best_match.name);
+				free_pkg_contents(&best_match);
+			}
+
+			/* Check if target is a package name, if not try to resolve it to a package name via RPM */
+			check_pkg = xasprintf("rpm -q %s >/dev/null 2>&1", target);
 			if (system(check_pkg) != 0) {
-				char *resolve_cmd = xasprintf("rpm -q --whatprovides '%s' --qf '%%{NAME}\\n' 2>/dev/null | head -n1", target);
+				/* Note: We use -q --whatprovides but ensure we only take the first line and check it's a valid package name */
+				char *resolve_cmd = xasprintf("rpm -q --whatprovides '%s' --qf '%%{NAME}\\n' 2>/dev/null", target);
 				FILE *rf = popen(resolve_cmd, "r");
 				if (rf) {
 					char *resolved = xmalloc_fgetline(rf);
-					if (resolved && resolved[0]) {
+					/* If it's a capability not found, RPM might return "no package provides ..." */
+					if (resolved && resolved[0] && !strstr(resolved, "no package provides")) {
 						free(target);
-						target = resolved;
-					} else {
-						free(resolved);
+						target = xstrdup(resolved);
 					}
+					free(resolved);
 					pclose(rf);
 				}
 				free(resolve_cmd);

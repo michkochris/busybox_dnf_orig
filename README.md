@@ -66,6 +66,7 @@ Commands:
 # perform smart inquiry via: (capabilities)
 ./busybox dnf reinstall "libmagic.so.1"
 ./busybox dnf verify "libmagic.so.1"
+./busybox dnf md5check "libz.so.1"
 ```
 
 ---
