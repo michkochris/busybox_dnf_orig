@@ -97,7 +97,7 @@ cd busybox-1.37.0
 ### 3. Integration
 Clone this repository into the root of your BusyBox source tree:
 ```bash
-git clone https://github.com/michkochris/busybox_dnf_orig busybox_dnf/
+git clone https://github.com/michkochris/busybox_dnf
 ```
 
 ### 4. Build
